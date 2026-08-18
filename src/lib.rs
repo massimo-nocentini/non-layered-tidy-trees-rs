@@ -327,18 +327,20 @@ fn add_child_spacing(a: &mut Arena, t: NodeId) {
     let mut d = 0.0;
     let mut modsumdelta = 0.0;
     for i in 0..a.nchildren(t) {
-        let c = a.child(t, i);
-        d += a[c].shift;
-        modsumdelta += d + a[c].change;
-        a[c].modifier += modsumdelta;
+        let ci = a.child(t, i);
+        let c = &mut a[ci];
+        d += c.shift;
+        modsumdelta += d + c.change;
+        c.modifier += modsumdelta;
     }
 }
 
 fn move_subtree(a: &mut Arena, t: NodeId, i: usize, si: usize, dist: f64) {
     let ci = a.child(t, i);
-    a[ci].modifier += dist;
-    a[ci].msel += dist;
-    a[ci].mser += dist;
+    let c = &mut a[ci];
+    c.modifier += dist;
+    c.msel += dist;
+    c.mser += dist;
 
     if si + 1 != i {
         // Are there intermediate children?
@@ -346,26 +348,22 @@ fn move_subtree(a: &mut Arena, t: NodeId, i: usize, si: usize, dist: f64) {
         let ratio = dist / nr;
         let cs = a.child(t, si + 1);
         a[cs].shift += ratio;
-        a[ci].shift -= ratio;
-        a[ci].change -= dist - ratio;
+        let c = &mut a[ci];
+        c.shift -= ratio;
+        c.change -= dist - ratio;
     }
 }
 
 fn next_left_contour(a: &Arena, t: NodeId) -> Option<NodeId> {
-    if a.nchildren(t) == 0 {
-        a[t].tl
-    } else {
-        Some(a.child(t, 0))
-    }
+    // The leftmost child, or the thread when there is none.
+    let n = &a[t];
+    n.children.first().copied().or(n.tl)
 }
 
+/// Symmetrical to [`next_left_contour`].
 fn next_right_contour(a: &Arena, t: NodeId) -> Option<NodeId> {
-    let n = a.nchildren(t);
-    if n == 0 {
-        a[t].tr
-    } else {
-        Some(a.child(t, n - 1))
-    }
+    let n = &a[t];
+    n.children.last().copied().or(n.tr)
 }
 
 fn set_left_thread(a: &mut Arena, t: NodeId, i: usize, cl: NodeId, modsumcl: f64) {
@@ -374,14 +372,16 @@ fn set_left_thread(a: &mut Arena, t: NodeId, i: usize, cl: NodeId, modsumcl: f64
     let li = a[c0]
         .el
         .expect("the leftmost child has an extreme left node");
-    a[li].tl = Some(cl);
 
     // Change mod so that the sum of modifier after following thread is correct.
     let diff = (modsumcl - a[cl].modifier) - a[c0].msel;
-    a[li].modifier += diff;
+
+    let l = &mut a[li];
+    l.tl = Some(cl);
+    l.modifier += diff;
 
     // Change preliminary x coordinate so that the node does not move.
-    a[li].prelim -= diff;
+    l.prelim -= diff;
 
     // Update extreme node and its sum of modifiers.
     a[c0].el = a[ci].el;
@@ -393,10 +393,13 @@ fn set_right_thread(a: &mut Arena, t: NodeId, i: usize, sr: NodeId, modsumsr: f6
     let ci = a.child(t, i);
     let cp = a.child(t, i - 1);
     let ri = a[ci].er.expect("the i-th child has an extreme right node");
-    a[ri].tr = Some(sr);
     let diff = (modsumsr - a[sr].modifier) - a[ci].mser;
-    a[ri].modifier += diff;
-    a[ri].prelim -= diff;
+
+    let r = &mut a[ri];
+    r.tr = Some(sr);
+    r.modifier += diff;
+    r.prelim -= diff;
+
     a[ci].er = a[cp].er;
     a[ci].mser = a[cp].mser;
 }
@@ -409,11 +412,13 @@ fn separate(
     i: usize,
     chain: &[ChainLink],
 ) {
-    let mut sr = Some(a.child(t, i - 1));
-    let mut mssr = a[a.child(t, i - 1)].modifier;
+    let prev = a.child(t, i - 1);
+    let mut sr = Some(prev);
+    let mut mssr = a[prev].modifier;
 
-    let mut cl = Some(a.child(t, i));
-    let mut mscl = a[a.child(t, i)].modifier;
+    let cur = a.child(t, i);
+    let mut cl = Some(cur);
+    let mut mscl = a[cur].modifier;
 
     // The head of the chain is its last element; `ih->nxt` is the element below.
     let mut ih = chain.len() - 1;
@@ -421,15 +426,22 @@ fn separate(
     let mut first = true;
 
     while let (Some(s), Some(c)) = (sr, cl) {
-        if a.bottom(s, input.vertically) > chain[ih].low {
+        // Neither `move_subtree` nor the callback -- which only gets a shared `Arena` --
+        // can touch what `bottom` reads, so the two contour depths are read once here and
+        // stand for the whole iteration.
+        let sy = a.bottom(s, input.vertically);
+        let cy = a.bottom(c, input.vertically);
+
+        if sy > chain[ih].low {
             ih = ih.checked_sub(1).expect(
                 "the sibling chain is seeded with a value that dominates the subtree depth",
             );
         }
 
         // How far to the left of the right side of sr is the left side of cl?
-        let srd = if input.vertically { a[s].w } else { a[s].h };
-        let dist = (mssr + a[s].prelim + srd + a[s].margin) - (mscl + a[c].prelim);
+        let sn = &a[s];
+        let srd = if input.vertically { sn.w } else { sn.h };
+        let dist = (mssr + sn.prelim + srd + sn.margin) - (mscl + a[c].prelim);
 
         // Pulling the subtree closer is only sound for the topmost pair of contour
         // nodes, hence `first` has to fall on every iteration, moving or not.
@@ -443,9 +455,6 @@ fn separate(
         if let Some(f) = cb.contour_pairs.as_mut() {
             f(a, s, c, dist);
         }
-
-        let sy = a.bottom(s, input.vertically);
-        let cy = a.bottom(c, input.vertically);
 
         if sy <= cy {
             sr = next_right_contour(a, s);
@@ -474,25 +483,23 @@ fn separate(
 
 fn position_root(a: &mut Arena, t: NodeId, vertically: bool) {
     // Position root between children, taking into account their mod.
-    let last = a.nchildren(t) - 1;
     let first = a.child(t, 0);
-    let last = a.child(t, last);
-    let d = if vertically {
-        a[last].w - a[t].w
-    } else {
-        a[last].h - a[t].h
-    };
-    a[t].prelim =
-        (a[first].prelim + a[first].modifier + a[last].prelim + a[last].modifier + d) / 2.0;
+    let last = a.child(t, a.nchildren(t) - 1);
+    let (f, l, n) = (&a[first], &a[last], &a[t]);
+
+    let d = if vertically { l.w - n.w } else { l.h - n.h };
+
+    a[t].prelim = (f.prelim + f.modifier + l.prelim + l.modifier + d) / 2.0;
 }
 
 fn first_walk(a: &mut Arena, input: &LayoutInput, cb: &mut Callbacks, t: NodeId) {
     if a.nchildren(t) == 0 {
         // setting extremes
-        a[t].el = Some(t);
-        a[t].er = Some(t);
-        a[t].msel = 0.0;
-        a[t].mser = 0.0;
+        let n = &mut a[t];
+        n.el = Some(t);
+        n.er = Some(t);
+        n.msel = 0.0;
+        n.mser = 0.0;
     } else {
         let c0 = a.child(t, 0);
         first_walk(a, input, cb, c0);
@@ -519,10 +526,13 @@ fn first_walk(a: &mut Arena, input: &LayoutInput, cb: &mut Callbacks, t: NodeId)
 
         // setting extremes
         let last = a.child(t, a.nchildren(t) - 1);
-        a[t].el = a[c0].el;
-        a[t].msel = a[c0].msel;
-        a[t].er = a[last].er;
-        a[t].mser = a[last].mser;
+        let (el, msel) = (a[c0].el, a[c0].msel);
+        let (er, mser) = (a[last].er, a[last].mser);
+        let n = &mut a[t];
+        n.el = el;
+        n.msel = msel;
+        n.er = er;
+        n.mser = mser;
     }
 }
 
@@ -533,28 +543,28 @@ fn second_walk(
     t: NodeId,
     modsum_init: f64,
 ) -> f64 {
+    let n = &mut a[t];
+
     // keep it for the recursive call at the end.
-    let modsum = modsum_init + a[t].modifier;
-    let d = a[t].prelim + modsum;
+    let modsum = modsum_init + n.modifier;
+    let d = n.prelim + modsum;
 
     let (xoffset, yoffset) = if input.centeredxy {
-        (a[t].w / 2.0, a[t].h / 2.0)
+        (n.w / 2.0, n.h / 2.0)
     } else {
         (0.0, 0.0)
     };
-    a[t].centeredxy = input.centeredxy;
+    n.centeredxy = input.centeredxy;
 
-    let mut best_min;
-
-    if input.vertically {
-        a[t].x = d + xoffset;
-        a[t].y += yoffset;
-        best_min = a[t].x;
+    let mut best_min = if input.vertically {
+        n.x = d + xoffset;
+        n.y += yoffset;
+        n.x
     } else {
-        a[t].x += xoffset;
-        a[t].y = d + yoffset;
-        best_min = a[t].y;
-    }
+        n.x += xoffset;
+        n.y = d + yoffset;
+        n.y
+    };
 
     add_child_spacing(a, t);
 
@@ -576,29 +586,31 @@ fn second_walk(
 }
 
 fn setup_walk(a: &mut Arena, input: &LayoutInput, t: NodeId, level: usize) {
-    a[t].level = level;
+    let n = &mut a[t];
+
+    n.level = level;
     // initially the algorithm requires top-left wise coordinates.
-    a[t].centeredxy = false;
+    n.centeredxy = false;
 
     // Clear everything the three walks accumulate into, threads included, so that
     // `layout` can be applied more than once to the same tree; the root starts the
     // depth axis over at the origin, `input.x` and `input.y` place it elsewhere.
-    a[t].prelim = 0.0;
-    a[t].modifier = 0.0;
-    a[t].shift = 0.0;
-    a[t].change = 0.0;
-    a[t].msel = 0.0;
-    a[t].mser = 0.0;
-    a[t].tl = None;
-    a[t].tr = None;
-    a[t].el = None;
-    a[t].er = None;
+    n.prelim = 0.0;
+    n.modifier = 0.0;
+    n.shift = 0.0;
+    n.change = 0.0;
+    n.msel = 0.0;
+    n.mser = 0.0;
+    n.tl = None;
+    n.tr = None;
+    n.el = None;
+    n.er = None;
 
     if level == 0 {
         if input.vertically {
-            a[t].y = 0.0;
+            n.y = 0.0;
         } else {
-            a[t].x = 0.0;
+            n.x = 0.0;
         }
     }
 
@@ -608,13 +620,15 @@ fn setup_walk(a: &mut Arena, input: &LayoutInput, t: NodeId, level: usize) {
 
     for i in 0..a.nchildren(t) {
         let child = a.child(t, i);
-        a[child].childno = i;
-        a[child].parent = Some(t);
+        let c = &mut a[child];
+
+        c.childno = i;
+        c.parent = Some(t);
 
         if input.vertically {
-            a[child].y = b;
+            c.y = b;
         } else {
-            a[child].x = b;
+            c.x = b;
         }
 
         setup_walk(a, input, child, nextlevel);
@@ -622,8 +636,9 @@ fn setup_walk(a: &mut Arena, input: &LayoutInput, t: NodeId, level: usize) {
 }
 
 fn third_walk(a: &mut Arena, t: NodeId, dx: f64, dy: f64) {
-    a[t].x -= dx;
-    a[t].y -= dy;
+    let n = &mut a[t];
+    n.x -= dx;
+    n.y -= dy;
 
     for i in 0..a.nchildren(t) {
         let c = a.child(t, i);
@@ -724,14 +739,16 @@ pub struct FringeMaxBottom {
 /// Walks the siblings to the right of `from`, then climbs to the parent and repeats, until
 /// `to` is met.
 pub fn max_bottom_between(arena: &Arena, from: NodeId, to: NodeId, ud: &mut FringeMaxBottom) {
-    let p = match arena[from].parent {
+    let n = &arena[from];
+
+    let p = match n.parent {
         Some(p) => p,
         None => return,
     };
 
     let mut found = false;
 
-    let mut i = arena[from].childno + 1;
+    let mut i = n.childno + 1;
     while !found && i < arena.nchildren(p) {
         let child = arena.child(p, i);
 
