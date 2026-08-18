@@ -1,6 +1,6 @@
 # A Rust port
 
-`src/non-layered-tidy-trees.c` translated into plain Rust, with the `test/` suite translated
+[`non-layered-tidy-trees.c`](https://github.com/massimo-nocentini/non-layered-tidy-trees.c) translated into plain Rust, with the `test/` suite translated
 along with it, plus a second implementation of the same algorithm over struct-of-arrays
 sweeps. The crate has no dependencies and no `unsafe` at all unless `--features simd` is
 asked for, which adds the AVX2 kernels and nothing else.

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["flat_xy_into","flat_xywh_into","layout","layout_api","layout_with","max_bottom","max_bottom_between","reify_flat_chunks"],"mod":["flat","treegen"],"struct":["Arena","Callbacks","FringeMaxBottom","LayoutInput","Node","NodeId"],"type":["ContourPairsFn","WalkFn"]};

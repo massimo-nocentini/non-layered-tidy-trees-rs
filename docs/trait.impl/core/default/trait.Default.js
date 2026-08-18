@@ -1,0 +1,9 @@
+(function() {
+    const implementors = Object.fromEntries([["non_layered_tidy_trees",[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.97.1/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"non_layered_tidy_trees/flat/struct.Engine.html\" title=\"struct non_layered_tidy_trees::flat::Engine\">Engine</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.97.1/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"non_layered_tidy_trees/flat/struct.Kernels.html\" title=\"struct non_layered_tidy_trees::flat::Kernels\">Kernels</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.97.1/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"non_layered_tidy_trees/flat/struct.Phases.html\" title=\"struct non_layered_tidy_trees::flat::Phases\">Phases</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.97.1/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"non_layered_tidy_trees/struct.Arena.html\" title=\"struct non_layered_tidy_trees::Arena\">Arena</a>",0],["impl&lt;'a&gt; <a class=\"trait\" href=\"https://doc.rust-lang.org/1.97.1/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"non_layered_tidy_trees/struct.Callbacks.html\" title=\"struct non_layered_tidy_trees::Callbacks\">Callbacks</a>&lt;'a&gt;",0]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":59,"fragment_lengths":[1535]}

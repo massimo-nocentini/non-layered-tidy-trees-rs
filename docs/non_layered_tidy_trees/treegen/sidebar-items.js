@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["REGIMES"],"enum":["Regime"],"fn":["bench_arrays","bench_tree","build","build_into","chain","collect","left","min_breadth","min_edges","overlap","top"],"struct":["Rng"]};

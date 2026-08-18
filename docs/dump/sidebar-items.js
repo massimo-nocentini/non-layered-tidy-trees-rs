@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["check","corpus","dump","lay_out","main","pick"],"struct":["Shape"],"type":["Impl"]};
