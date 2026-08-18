@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # The crate has no dependencies, so there is nothing to cache and nothing to audit:
+  # a cold build is a few seconds. `ubuntu-latest` is x86_64 and so exercises the AVX2
+  # kernels for real; `macos-latest` is aarch64 and takes the scalar fallback, which is
+  # the other half of what `--features simd` has to keep working.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+          rustup component add rustfmt clippy
+          rustc --version && cargo --version
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features
+
+      - name: Test, scalar kernels and then the vectorized ones
+        run: make test
+
+      - name: Smoke the benchmark harness
+        run: cargo run --release --features simd --bin bench -- 1
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+
+      - name: Build the API documentation
+        run: cargo doc --no-deps --all-features
+
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+
+      # Catches a `Cargo.toml` that would ship the generated `docs/` folder, or an
+      # `exclude` that has drifted from what the crate actually needs.
+      - name: Check the published crate
+        run: |
+          cargo package --list
+          cargo package --allow-dirty

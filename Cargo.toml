@@ -8,6 +8,9 @@ repository = "https://github.com/massimo-nocentini/non-layered-tidy-trees-rs"
 readme = "README.md"
 keywords = ["tree", "layout", "drawing", "tidy"]
 categories = ["algorithms", "visualization"]
+documentation = "https://docs.rs/non-layered-tidy-trees"
+# `docs/` is 3.5 MB of committed rustdoc, there for GitHub Pages and not for the crate.
+exclude = ["docs/", ".github/"]
 
 [features]
 # Explicit AVX2 kernels for the elementwise sweeps of `flat`, with runtime detection.

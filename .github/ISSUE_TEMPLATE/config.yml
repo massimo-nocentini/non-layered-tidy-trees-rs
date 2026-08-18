@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: The C implementation
+    url: https://github.com/massimo-nocentini/non-layered-tidy-trees.c
+    about: For questions about the algorithm itself, or about the C sources this ports.
+  - name: The paper
+    url: https://doi.org/10.1002/spe.2213
+    about: van der Ploeg, A. (2014), Drawing non-layered tidy trees in linear time.

@@ -1,0 +1,8 @@
+* text=auto eol=lf
+
+*.rs text diff=rust
+
+# `docs/` is rustdoc output, committed only so GitHub Pages can serve it from the folder.
+# Marking it generated keeps it out of the repository's language statistics and collapses
+# it in diffs and pull requests.
+docs/** linguist-generated=true

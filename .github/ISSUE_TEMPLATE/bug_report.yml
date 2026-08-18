@@ -1,0 +1,59 @@
+name: Bug report
+description: A layout that is wrong, a panic, or a disagreement with the C implementation
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The port is meant to be *numerically* identical to
+        [`non-layered-tidy-trees.c`](https://github.com/massimo-nocentini/non-layered-tidy-trees.c),
+        so a coordinate that differs from the C build is a bug even when the drawing looks fine.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The wrong coordinates, the panic message, or the assertion that fired.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: >
+        A tree that shows it, ideally as the `Arena` calls that build it or as the
+        `w`/`h`/`margin`/`children` arrays of `layout_api`.
+      render: rust
+    validations:
+      required: true
+
+  - type: dropdown
+    id: path
+    attributes:
+      label: Which implementation
+      multiple: true
+      options:
+        - layout (the recursive port)
+        - flat::layout_flat / Engine (the sweeps)
+        - layout_api / layout_api_flat (the array API)
+        - "--features simd (the AVX2 kernels)"
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Version and toolchain
+      description: The crate version or commit, `rustc --version`, and the target triple.
+      placeholder: 0.1.0, rustc 1.97.0, x86_64-unknown-linux-gnu
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: "`make test` reproduces it, or I have said why it does not"
+        - label: I checked whether the C build agrees with this crate on the same tree

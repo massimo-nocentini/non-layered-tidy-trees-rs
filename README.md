@@ -1,5 +1,9 @@
 # A Rust port
 
+[![CI](https://github.com/massimo-nocentini/non-layered-tidy-trees-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/massimo-nocentini/non-layered-tidy-trees-rs/actions/workflows/ci.yml)
+[![docs](https://img.shields.io/badge/docs-master-blue)](https://massimo-nocentini.github.io/non-layered-tidy-trees-rs/)
+[![licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+
 [`non-layered-tidy-trees.c`](https://github.com/massimo-nocentini/non-layered-tidy-trees.c) translated into plain Rust, with the `test/` suite translated
 along with it, plus a second implementation of the same algorithm over struct-of-arrays
 sweeps. The crate has no dependencies and no `unsafe` at all unless `--features simd` is
@@ -14,6 +18,11 @@ cargo doc --open                  # the API, with the C names alongside
 cargo run --release --features simd --bin bench    # the numbers below
 make -C ../test bench                              # the C rows of the same table
 ```
+
+The `Makefile` wraps the same commands — `make test` runs the suite with the scalar kernels
+and then with the vectorized ones, `make bench` prints the tables below, `make doc` writes
+the API into `docs/`, and `make help` lists the rest. [`CONTRIBUTING.md`](CONTRIBUTING.md)
+says what a patch to a port has to keep true.
 
 The port is intended to be *numerically* identical, not merely equivalent: the walks, the
 sibling chain, the threading and the one behavioural fix in `separate` follow the C line by

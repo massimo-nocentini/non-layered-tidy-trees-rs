@@ -1,0 +1,33 @@
+name: Feature request
+description: Something the crate should do and does not
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep in mind what this crate is: a line-by-line port of a C implementation, with no
+        dependencies and no `unsafe` outside `--features simd`. Proposals that change the
+        coordinates the algorithm produces are unlikely to land.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What is missing
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: What it would be used for
+      description: The concrete case, not the general shape.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints
+      options:
+        - label: This keeps the output bit-identical to the C implementation
+        - label: This adds no dependency
