@@ -137,6 +137,20 @@ impl Node {
     pub fn children(&self) -> &[NodeId] {
         &self.children
     }
+
+    /// Half the width: the offset between a centred `x` and the left or right edge.
+    ///
+    /// [`centeredxy`](Node::centeredxy) is what decides whether that offset applies, so
+    /// the two are always read together; this is the whole of what centring does to a
+    /// coordinate.
+    pub(crate) fn half_w(&self) -> f64 {
+        self.w / 2.0
+    }
+
+    /// Half the height; see [`Node::half_w`].
+    pub(crate) fn half_h(&self) -> f64 {
+        self.h / 2.0
+    }
 }
 
 /// The nodes of one or more trees, owning them for as long as the arena lives.
@@ -236,9 +250,9 @@ impl Arena {
     pub fn bottom(&self, t: NodeId, vertically: bool) -> f64 {
         let n = &self.nodes[t.0];
         if vertically {
-            n.y + if n.centeredxy { n.h / 2.0 } else { n.h }
+            n.y + if n.centeredxy { n.half_h() } else { n.h }
         } else {
-            n.x + if n.centeredxy { n.w / 2.0 } else { n.w }
+            n.x + if n.centeredxy { n.half_w() } else { n.w }
         }
     }
 
@@ -550,7 +564,7 @@ fn second_walk(
     let d = n.prelim + modsum;
 
     let (xoffset, yoffset) = if input.centeredxy {
-        (n.w / 2.0, n.h / 2.0)
+        (n.half_w(), n.half_h())
     } else {
         (0.0, 0.0)
     };

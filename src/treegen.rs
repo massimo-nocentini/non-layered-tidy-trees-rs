@@ -251,7 +251,7 @@ pub fn collect(arena: &Arena, root: NodeId) -> Vec<NodeId> {
 pub fn left(arena: &Arena, t: NodeId) -> f64 {
     let n = &arena[t];
     if n.centeredxy {
-        n.x - n.w / 2.0
+        n.x - n.half_w()
     } else {
         n.x
     }
@@ -261,7 +261,7 @@ pub fn left(arena: &Arena, t: NodeId) -> f64 {
 pub fn top(arena: &Arena, t: NodeId) -> f64 {
     let n = &arena[t];
     if n.centeredxy {
-        n.y - n.h / 2.0
+        n.y - n.half_h()
     } else {
         n.y
     }
