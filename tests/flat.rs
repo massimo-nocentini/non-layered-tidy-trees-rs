@@ -148,12 +148,14 @@ fn layout_api_flat_agrees_with_layout_api() {
     ] {
         for vert in [false, true] {
             for cent in [false, true] {
+                // the last `n` are the margins, which is what tells the gap node's band
+                // apart from the node's own -- see the paired mirror in `flat`.
                 let mut wh: Vec<f64> = (0..3 * n)
                     .map(|i| {
                         if i < 2 * n {
                             10.0 + (i % 5) as f64
                         } else {
-                            0.0
+                            (i % 3) as f64
                         }
                     })
                     .collect();
@@ -186,4 +188,68 @@ fn layout_api_flat_agrees_with_layout_api() {
             }
         }
     }
+}
+
+/// The paired mirror against the gap nodes the recursion actually builds.
+///
+/// `layout_api` reifies an invisible node above every node to space the levels apart;
+/// `flat` folds it into the node's own entry as a second band. That fold is only exact
+/// because the band keeps the gap node's *width* and its lack of a margin: giving it the
+/// node's margin instead moves nodes, which is what this sweep would catch.
+///
+/// The trees come from `bench_arrays`, whose margins are nonzero, under all three
+/// gap-width regimes a caller can pass.
+#[test]
+fn the_paired_mirror_agrees_with_the_reified_gap_nodes() {
+    let trials: u64 = std::env::var("NLTT_TRIALS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+
+    /// A single node, a pair, a fan, and enough of a tree to thread through.
+    const SIZES: [usize; 7] = [1, 2, 3, 7, 40, 300, 1500];
+
+    let mut checked = 0;
+
+    for seed in 0..trials {
+        for &n in &SIZES {
+            let (wh, mut whg, children) = treegen::bench_arrays(n, 5, seed);
+
+            match seed % 3 {
+                // the gap node as wide as its node, which is what `bench_arrays` builds
+                0 => {}
+                // a gap node of no width at all, the other convention
+                1 => (0..n).for_each(|i| whg[i] = 0.0),
+                // and one that is neither
+                _ => (0..n).for_each(|i| whg[i] = wh[i] * 0.5 + (i % 7) as f64),
+            }
+
+            for vert in [false, true] {
+                for cent in [false, true] {
+                    let mut expected = wh.clone();
+                    let mut got = wh.clone();
+
+                    layout_api(n, &mut expected, &whg, &children, 1, vert, cent, 1.5, -0.5);
+                    flat::layout_api_flat(n, &mut got, &whg, &children, 1, vert, cent, 1.5, -0.5);
+
+                    for i in 0..2 * n {
+                        assert_eq!(
+                            got[i].to_bits(),
+                            expected[i].to_bits(),
+                            "n={n} seed={seed} vert={vert} cent={cent}, value {i}: \
+                             {} against {}",
+                            got[i],
+                            expected[i]
+                        );
+                    }
+
+                    checked += 2 * n;
+                }
+            }
+        }
+    }
+
+    // `x` and `y` of every node, over both orientations and both centrings
+    let expected = trials as usize * 4 * 2 * SIZES.iter().sum::<usize>();
+    assert_eq!(checked, expected, "the sweep did not run over every tree");
 }

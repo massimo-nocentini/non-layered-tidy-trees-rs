@@ -6,6 +6,11 @@
 //!
 //! * the tree is copied into a transient mirror in **breadth-first order**, so the children
 //!   of a node are a contiguous index range and every node of a given depth is adjacent;
+//! * the invisible node [`crate::layout_api`] inserts above every node to space the levels
+//!   apart is not a mirror entry of its own: it becomes the upper *band* of the entry it
+//!   belongs to, which halves the largest mirror there is. It is a fold and not a merge --
+//!   the band keeps the gap node's own width and its lack of a margin, and the contour walk
+//!   still compares it separately, which is what keeps the coordinates identical;
 //! * every walk becomes a sweep over that mirror, forwards or backwards, with no recursion
 //!   at all — which also removes the stack-depth ceiling the recursive path has;
 //! * `bottom` is precomputed once into `bot[]`, which takes two branches out of the
@@ -28,7 +33,10 @@
 use crate::{Arena, LayoutInput, NodeId};
 
 /// The absence of a node, where the pointer version has `NULL`.
-const NONE: i32 = -1;
+///
+/// `usize::MAX` rather than `-1`: the indices are as wide as the address space, so a mirror
+/// is capped by the memory it fits in rather than by 2^31 nodes.
+const NONE: usize = usize::MAX;
 
 /// Lays out the tree with the flat sweeps, writing `x` and `y` back into the arena.
 ///
@@ -135,13 +143,7 @@ impl Engine {
         let t = crate::trace::start();
         self.flat
             .rebuild_from_arrays(n, wh, whg, children, rooti, vertically);
-        sum += phase!(
-            t,
-            "build",
-            "{} content={}",
-            mirror(&self.flat),
-            self.flat.content
-        );
+        sum += phase!(t, "build", "{}", mirror(&self.flat));
 
         let (minbreadth, swept) =
             sweeps(&mut self.flat, vertically, centeredxy, x, y, self.kernels);
@@ -397,22 +399,46 @@ fn run_profiled(
 /// The breadth axis is the one the algorithm positions along and the depth axis is the one
 /// it stacks levels along; which of `x`/`y` each is depends on `vertically`, and the
 /// mapping happens once on the way in and once on the way out rather than at every use.
+///
+/// Every index here is a `usize`, so a mirror is bounded by the memory it fits in and not
+/// by a 32-bit node count. That is not free -- the contour walk is memory bound, and eight
+/// byte links cost it a quarter of its time against four byte ones -- but a truncating
+/// index would be silently wrong rather than slow.
 #[derive(Debug, Default)]
 struct Flat {
+    /// How many entries the mirror holds; `2 * n` bands when [`Flat::paired`].
     n: usize,
 
-    /// Extent along the breadth axis: `w` when laying out vertically.
+    /// Whether every entry carries the gap node of the flat API as a second band.
+    ///
+    /// The API inserts an invisible node above every node to space the levels apart, which
+    /// doubles a tree that is already the largest thing in memory. Here that node is not an
+    /// entry of its own: it is the *upper band* of the entry it belongs to, band `2 * v`,
+    /// with the node itself in the lower band, `2 * v + 1`. The two bands differ in extent,
+    /// in depth and in margin -- a gap node keeps none, which is what a fold into the
+    /// node's own box would get wrong -- and share everything the algorithm carries per
+    /// subtree: `el`, `er`, `msel`, `mser`, the threads, the children and the parent.
+    ///
+    /// The band arrays are `bext`, `dext`, `bot`, `prelim` and `modifier`; everything else
+    /// is one value per entry. A mirror built from an [`Arena`] has no gap nodes, so there
+    /// every entry is one band and the two indices coincide.
+    paired: bool,
+
+    /// Extent along the breadth axis: `w` when laying out vertically. Per band.
     bext: Vec<f64>,
-    /// Extent along the depth axis: `h` when laying out vertically.
+    /// Extent along the depth axis: `h` when laying out vertically. Per band.
     dext: Vec<f64>,
+    /// Per entry: the band of the gap node keeps no margin of its own.
     margin: Vec<f64>,
 
     breadth: Vec<f64>,
     depth: Vec<f64>,
-    /// `bottom()`, precomputed: `depth + dext` while the walks need it.
+    /// `bottom()`, precomputed: `depth + dext` while the walks need it. Per band.
     bot: Vec<f64>,
 
+    /// Per band.
     prelim: Vec<f64>,
+    /// Per band.
     modifier: Vec<f64>,
     shift: Vec<f64>,
     change: Vec<f64>,
@@ -420,23 +446,22 @@ struct Flat {
     mser: Vec<f64>,
     modsum: Vec<f64>,
 
-    tl: Vec<i32>,
-    tr: Vec<i32>,
-    el: Vec<i32>,
-    er: Vec<i32>,
+    tl: Vec<usize>,
+    tr: Vec<usize>,
+    el: Vec<usize>,
+    er: Vec<usize>,
 
-    parent: Vec<i32>,
-    childno: Vec<u32>,
-    first_child: Vec<u32>,
-    child_count: Vec<u32>,
+    parent: Vec<usize>,
+    childno: Vec<usize>,
+    first_child: Vec<usize>,
+    child_count: Vec<usize>,
 
     /// Level `l` spans `levels[l]..levels[l + 1]`.
     levels: Vec<usize>,
     /// Where each node came from, when the mirror was built from an [`Arena`].
     id: Vec<NodeId>,
-    /// What each node is, when the mirror was built from flat arrays: `i` for the content
-    /// node `i`, `i + n` for the gap node above it, which has no output slot of its own.
-    src: Vec<i32>,
+    /// Which node of the flat API each entry is, when the mirror was built from arrays.
+    src: Vec<usize>,
     /// Where each node's children start in the adjacency; scratch for the flat arrays.
     off: Vec<usize>,
     /// How many content nodes the mirror reached.
@@ -444,9 +469,22 @@ struct Flat {
 }
 
 /// `v` becomes `n` copies of `zero`, keeping whatever it already allocated.
+///
+/// The growth `resize` would do on its own doubles, which for the largest trees is up to
+/// half the mirror in slack; ask for what is needed and no more.
 fn reset<T: Copy>(v: &mut Vec<T>, n: usize, zero: T) {
     v.clear();
+    if v.capacity() < n {
+        v.reserve_exact(n);
+    }
     v.resize(n, zero);
+}
+
+/// Room for `n` elements in an empty `v`, without the doubling.
+fn reserve_exact<T>(v: &mut Vec<T>, n: usize) {
+    if v.capacity() < n {
+        v.reserve_exact(n);
+    }
 }
 
 impl Flat {
@@ -454,6 +492,7 @@ impl Flat {
     fn rebuild(&mut self, arena: &Arena, root: NodeId, vertically: bool) {
         let f = self;
 
+        f.paired = false;
         f.id.clear();
         f.src.clear();
         f.bext.clear();
@@ -475,11 +514,11 @@ impl Flat {
         let mut end = 1;
         while start < end {
             for i in start..end {
-                f.first_child[i] = f.id.len() as u32;
+                f.first_child[i] = f.id.len();
                 let children = arena.children(f.id[i]);
-                f.child_count[i] = children.len() as u32;
+                f.child_count[i] = children.len();
                 for (k, &c) in children.iter().enumerate() {
-                    f.push(arena, c, i as i32, k as u32, vertically);
+                    f.push(arena, c, i, k, vertically);
                 }
             }
             start = end;
@@ -489,27 +528,77 @@ impl Flat {
             }
         }
 
-        // Every accumulator starts at zero and every thread at `NONE`, which is what the
-        // recursive path's `setup_walk` spends a whole traversal restoring.
         let n = f.id.len();
         f.n = n;
-        reset(&mut f.breadth, n, 0.0);
-        reset(&mut f.depth, n, 0.0);
-        reset(&mut f.bot, n, 0.0);
-        reset(&mut f.prelim, n, 0.0);
-        reset(&mut f.modifier, n, 0.0);
-        reset(&mut f.shift, n, 0.0);
-        reset(&mut f.change, n, 0.0);
-        reset(&mut f.msel, n, 0.0);
-        reset(&mut f.mser, n, 0.0);
-        reset(&mut f.modsum, n, 0.0);
-        reset(&mut f.tl, n, NONE);
-        reset(&mut f.tr, n, NONE);
-        reset(&mut f.el, n, NONE);
-        reset(&mut f.er, n, NONE);
+        f.reset_state(n, n);
     }
 
-    /// Fills the mirror straight from the arrays of the flat API, gap nodes included.
+    /// Zeroes what the sweeps accumulate into, threads included.
+    ///
+    /// This is what the recursive path's `setup_walk` spends a whole traversal restoring;
+    /// `bands` is `2 * entries` for a [paired](Flat::paired) mirror and `entries` otherwise.
+    fn reset_state(&mut self, entries: usize, bands: usize) {
+        reset(&mut self.bot, bands, 0.0);
+        reset(&mut self.prelim, bands, 0.0);
+        reset(&mut self.modifier, bands, 0.0);
+
+        reset(&mut self.breadth, entries, 0.0);
+        reset(&mut self.depth, entries, 0.0);
+        reset(&mut self.shift, entries, 0.0);
+        reset(&mut self.change, entries, 0.0);
+        reset(&mut self.msel, entries, 0.0);
+        reset(&mut self.mser, entries, 0.0);
+        reset(&mut self.modsum, entries, 0.0);
+        reset(&mut self.tl, entries, NONE);
+        reset(&mut self.tr, entries, NONE);
+        reset(&mut self.el, entries, NONE);
+        reset(&mut self.er, entries, NONE);
+    }
+
+    /// The upper band of an entry: the gap node, where there is one.
+    #[inline(always)]
+    fn gap<const P: bool>(v: usize) -> usize {
+        if P {
+            2 * v
+        } else {
+            v
+        }
+    }
+
+    /// The lower band of an entry: the node itself.
+    #[inline(always)]
+    fn con<const P: bool>(v: usize) -> usize {
+        if P {
+            2 * v + 1
+        } else {
+            v
+        }
+    }
+
+    /// The entry a band belongs to.
+    #[inline(always)]
+    fn owner<const P: bool>(b: usize) -> usize {
+        if P {
+            b >> 1
+        } else {
+            b
+        }
+    }
+
+    /// The margin of a band; a gap node keeps none.
+    #[inline(always)]
+    fn margin_of<const P: bool>(&self, b: usize) -> f64 {
+        if P && b.is_multiple_of(2) {
+            0.0
+        } else {
+            self.margin[Self::owner::<P>(b)]
+        }
+    }
+
+    /// Fills the mirror straight from the arrays of the flat API.
+    ///
+    /// One entry per node, with the gap node the API inserts above it as the entry's upper
+    /// band rather than as an entry of its own; see [`Flat::paired`].
     fn rebuild_from_arrays(
         &mut self,
         n: usize,
@@ -528,6 +617,7 @@ impl Flat {
 
         let f = self;
 
+        f.paired = true;
         f.id.clear();
         f.src.clear();
         f.bext.clear();
@@ -553,36 +643,31 @@ impl Flat {
             "the adjacency is shorter than the counts promise"
         );
 
-        f.content = 0;
-        f.push_from_arrays(n, (rooti - 1 + n) as i32, wh, whg, NONE, 0, vertically);
+        // Every node of the input is at most one entry, and every entry is two bands;
+        // reserving that outright keeps the doubling out of the largest allocations.
+        reserve_exact(&mut f.src, n);
+        reserve_exact(&mut f.margin, n);
+        reserve_exact(&mut f.parent, n);
+        reserve_exact(&mut f.childno, n);
+        reserve_exact(&mut f.first_child, n);
+        reserve_exact(&mut f.child_count, n);
+        reserve_exact(&mut f.bext, 2 * n);
+        reserve_exact(&mut f.dext, 2 * n);
+
+        f.push_entry(n, rooti - 1, wh, whg, NONE, 0, vertically);
 
         let mut start = 0;
         let mut end = 1;
         while start < end {
             for m in start..end {
-                f.first_child[m] = f.src.len() as u32;
-                let s = f.src[m] as usize;
+                f.first_child[m] = f.src.len();
+                let s = f.src[m];
+                let count = children[s];
+                f.child_count[m] = count;
 
-                if s < n {
-                    // A content node: its children are the gap nodes above theirs.
-                    let count = children[s];
-                    f.child_count[m] = count as u32;
-                    for k in 0..count {
-                        let c = children[f.off[s] + k] - 1;
-                        f.push_from_arrays(
-                            n,
-                            (c + n) as i32,
-                            wh,
-                            whg,
-                            m as i32,
-                            k as u32,
-                            vertically,
-                        );
-                    }
-                } else {
-                    // A gap node: exactly the content node it separates.
-                    f.child_count[m] = 1;
-                    f.push_from_arrays(n, (s - n) as i32, wh, whg, m as i32, 0, vertically);
+                for k in 0..count {
+                    let c = children[f.off[s] + k] - 1;
+                    f.push_entry(n, c, wh, whg, m, k, vertically);
                 }
             }
             start = end;
@@ -592,50 +677,37 @@ impl Flat {
             }
         }
 
-        let total = f.src.len();
-        f.n = total;
-        reset(&mut f.breadth, total, 0.0);
-        reset(&mut f.depth, total, 0.0);
-        reset(&mut f.bot, total, 0.0);
-        reset(&mut f.prelim, total, 0.0);
-        reset(&mut f.modifier, total, 0.0);
-        reset(&mut f.shift, total, 0.0);
-        reset(&mut f.change, total, 0.0);
-        reset(&mut f.msel, total, 0.0);
-        reset(&mut f.mser, total, 0.0);
-        reset(&mut f.modsum, total, 0.0);
-        reset(&mut f.tl, total, NONE);
-        reset(&mut f.tr, total, NONE);
-        reset(&mut f.el, total, NONE);
-        reset(&mut f.er, total, NONE);
+        let entries = f.src.len();
+        f.n = entries;
+        f.content = entries;
+        f.reset_state(entries, 2 * entries);
     }
 
+    /// Pushes the entry of node `s`: its gap node into the upper band, itself into the lower.
     #[allow(clippy::too_many_arguments)]
-    fn push_from_arrays(
+    fn push_entry(
         &mut self,
         n: usize,
-        src: i32,
+        s: usize,
         wh: &[f64],
         whg: &[f64],
-        parent: i32,
-        childno: u32,
+        parent: usize,
+        childno: usize,
         vertically: bool,
     ) {
-        let s = src as usize;
+        let (w, h) = (wh[s], wh[s + n]);
+        let (wg, hg) = (whg[s], whg[s + n]);
 
-        let (w, h, margin) = if s < n {
-            self.content += 1;
-            (wh[s], wh[s + n], wh[s + 2 * n])
-        } else {
-            (whg[s - n], whg[s - n + n], 0.0)
-        };
+        let (bg, dg) = if vertically { (wg, hg) } else { (hg, wg) };
+        let (b, d) = if vertically { (w, h) } else { (h, w) };
 
-        let (bext, dext) = if vertically { (w, h) } else { (h, w) };
+        self.bext.push(bg);
+        self.dext.push(dg);
+        self.bext.push(b);
+        self.dext.push(d);
 
-        self.src.push(src);
-        self.bext.push(bext);
-        self.dext.push(dext);
-        self.margin.push(margin);
+        self.src.push(s);
+        self.margin.push(wh[s + 2 * n]);
         self.parent.push(parent);
         self.childno.push(childno);
         self.first_child.push(0);
@@ -653,11 +725,7 @@ impl Flat {
         }
 
         for m in 0..self.n {
-            let s = self.src[m] as usize;
-            if s >= n {
-                continue;
-            }
-
+            let s = self.src[m];
             let (b, d) = (self.breadth[m], self.depth[m]);
             let (x, y) = if vertically { (b, d) } else { (d, b) };
 
@@ -666,7 +734,7 @@ impl Flat {
         }
     }
 
-    fn push(&mut self, arena: &Arena, id: NodeId, parent: i32, childno: u32, vertically: bool) {
+    fn push(&mut self, arena: &Arena, id: NodeId, parent: usize, childno: usize, vertically: bool) {
         let node = &arena[id];
         let (bext, dext) = if vertically {
             (node.w, node.h)
@@ -685,12 +753,21 @@ impl Flat {
     }
 
     fn children(&self, i: usize) -> std::ops::Range<usize> {
-        let f = self.first_child[i] as usize;
-        f..f + self.child_count[i] as usize
+        let f = self.first_child[i];
+        f..f + self.child_count[i]
     }
 
     /// `setup_walk`: the depth axis follows from the node extents, one level below the next.
     fn setup_sweep(&mut self, k: Kernels) {
+        if self.paired {
+            self.setup_sweep_paired();
+        } else {
+            self.setup_sweep_plain(k);
+        }
+    }
+
+    /// [`Flat::setup_sweep`], over a mirror of one band per entry.
+    fn setup_sweep_plain(&mut self, k: Kernels) {
         self.depth[0] = 0.0;
         self.bot[0] = self.dext[0];
 
@@ -708,72 +785,118 @@ impl Flat {
         }
     }
 
+    /// [`Flat::setup_sweep`], over the two bands of every entry.
+    ///
+    /// One forward pass is enough where the plain sweep needs to reach for its children:
+    /// breadth-first order puts a parent before them, so the band a child hangs from is
+    /// already final. `depth` is the top of the lower band, which is what the node draws at.
+    fn setup_sweep_paired(&mut self) {
+        self.bot[0] = self.dext[0];
+        self.bot[1] = self.bot[0] + self.dext[1];
+        self.depth[0] = self.bot[0];
+
+        for v in 1..self.n {
+            let top = self.bot[2 * self.parent[v] + 1];
+            let g = 2 * v;
+
+            self.bot[g] = top + self.dext[g];
+            self.bot[g + 1] = self.bot[g] + self.dext[g + 1];
+            self.depth[v] = self.bot[g];
+        }
+    }
+
     /// `first_walk`: a reverse sweep, deepest level first.
     ///
     /// Nodes of one level own disjoint subtrees, so their `separate`/`position_root` work is
     /// independent of one another; visiting them in index order rather than in the order the
-    /// recursion would is the only thing that changes.
+    /// recursion would is the only thing that changes. For the same reason a paired mirror
+    /// may close an entry's gap band right after the entry rather than a level later.
     fn first_sweep(&mut self) {
+        if self.paired {
+            self.first_sweep_impl::<true>();
+        } else {
+            self.first_sweep_impl::<false>();
+        }
+    }
+
+    fn first_sweep_impl<const P: bool>(&mut self) {
         let mut chain: Vec<ChainLink> = Vec::new();
 
-        for i in (0..self.n).rev() {
-            let c = self.children(i);
+        for v in (0..self.n).rev() {
+            let c = self.children(v);
 
             if c.is_empty() {
-                self.el[i] = i as i32;
-                self.er[i] = i as i32;
-                self.msel[i] = 0.0;
-                self.mser[i] = 0.0;
-                continue;
+                self.el[v] = v;
+                self.er[v] = v;
+                self.msel[v] = 0.0;
+                self.mser[v] = 0.0;
+            } else {
+                let first = c.start;
+                let last = c.end - 1;
+
+                chain.clear();
+                update_chain(&mut chain, self.bot[Self::con::<P>(self.el[first])], 0);
+
+                for k in 1..c.len() {
+                    let ci = first + k;
+                    let min = self.bot[Self::con::<P>(self.er[ci])];
+
+                    self.separate::<P>(v, k, &chain);
+
+                    update_chain(&mut chain, min, k);
+                }
+
+                // `position_root`: between the children, taking their modifiers into
+                // account. A child presents its gap band, which is what a parent sees.
+                let (t, gf, gl) = (
+                    Self::con::<P>(v),
+                    Self::gap::<P>(first),
+                    Self::gap::<P>(last),
+                );
+                let d = self.bext[gl] - self.bext[t];
+                self.prelim[t] =
+                    (self.prelim[gf] + self.modifier[gf] + self.prelim[gl] + self.modifier[gl] + d)
+                        / 2.0;
+
+                self.el[v] = self.el[first];
+                self.msel[v] = self.msel[first];
+                self.er[v] = self.er[last];
+                self.mser[v] = self.mser[last];
             }
 
-            let first = c.start;
-            let last = c.end - 1;
+            if P {
+                // The gap node above the entry: one child, so `position_root` and nothing
+                // else -- the extremes and their modifier sums are the ones just set.
+                let (g, t) = (2 * v, 2 * v + 1);
+                let d = self.bext[t] - self.bext[g];
 
-            chain.clear();
-            update_chain(&mut chain, self.bot[self.el[first] as usize], 0);
-
-            for k in 1..c.len() {
-                let ci = first + k;
-                let min = self.bot[self.er[ci] as usize];
-
-                self.separate(i, k, &chain);
-
-                update_chain(&mut chain, min, k);
+                self.prelim[g] =
+                    (self.prelim[t] + self.modifier[t] + self.prelim[t] + self.modifier[t] + d)
+                        / 2.0;
             }
-
-            // `position_root`: between the children, taking their modifiers into account.
-            let d = self.bext[last] - self.bext[i];
-            self.prelim[i] = (self.prelim[first]
-                + self.modifier[first]
-                + self.prelim[last]
-                + self.modifier[last]
-                + d)
-                / 2.0;
-
-            self.el[i] = self.el[first];
-            self.msel[i] = self.msel[first];
-            self.er[i] = self.er[last];
-            self.mser[i] = self.mser[last];
         }
     }
 
     /// The contour walk, which is where the time goes and which stays scalar.
-    fn separate(&mut self, t: usize, k: usize, chain: &[ChainLink]) {
-        let base = self.first_child[t] as usize;
+    ///
+    /// The two contours are walked band by band: for a paired mirror that is the gap node
+    /// and then the node itself, which is exactly what the recursion sees when the two are
+    /// separate nodes -- the gap band is the narrower box, and it carries no margin.
+    fn separate<const P: bool>(&mut self, t: usize, k: usize, chain: &[ChainLink]) {
+        let base = self.first_child[t];
         let i = base + k;
 
-        let mut sr = i as i32 - 1;
-        let mut mssr = self.modifier[i - 1];
+        let mut sr = Self::gap::<P>(i - 1);
+        let mut mssr = self.modifier[sr];
 
-        let mut cl = i as i32;
-        let mut mscl = self.modifier[i];
+        let mut cl = Self::gap::<P>(i);
+        let mut mscl = self.modifier[cl];
 
         let mut ih = chain.len() - 1;
         let mut first = true;
 
         while sr != NONE && cl != NONE {
-            let (s, c) = (sr as usize, cl as usize);
+            let (s, c) = (sr, cl);
 
             if self.bot[s] > chain[ih].low {
                 ih = ih.checked_sub(1).expect(
@@ -781,12 +904,12 @@ impl Flat {
                 );
             }
 
-            let dist =
-                (mssr + self.prelim[s] + self.bext[s] + self.margin[s]) - (mscl + self.prelim[c]);
+            let dist = (mssr + self.prelim[s] + self.bext[s] + self.margin_of::<P>(s))
+                - (mscl + self.prelim[c]);
 
             if (first && dist < 0.0) || dist > 0.0 {
                 mscl += dist;
-                self.move_subtree(t, k, chain[ih].index, dist);
+                self.move_subtree::<P>(t, k, chain[ih].index, dist);
             }
 
             first = false;
@@ -794,48 +917,62 @@ impl Flat {
             let (sy, cy) = (self.bot[s], self.bot[c]);
 
             if sy <= cy {
-                sr = self.next_right_contour(s);
+                sr = self.next_right_contour::<P>(s);
                 if sr != NONE {
-                    mssr += self.modifier[sr as usize];
+                    mssr += self.modifier[sr];
                 }
             }
 
             if sy >= cy {
-                cl = self.next_left_contour(c);
+                cl = self.next_left_contour::<P>(c);
                 if cl != NONE {
-                    mscl += self.modifier[cl as usize];
+                    mscl += self.modifier[cl];
                 }
             }
         }
 
         if sr == NONE && cl != NONE {
-            self.set_left_thread(base, k, cl as usize, mscl);
+            self.set_left_thread::<P>(base, k, cl, mscl);
         } else if sr != NONE && cl == NONE {
-            self.set_right_thread(base, k, sr as usize, mssr);
+            self.set_right_thread::<P>(base, k, sr, mssr);
         }
     }
 
-    fn next_left_contour(&self, i: usize) -> i32 {
-        if self.child_count[i] == 0 {
-            self.tl[i]
+    /// The band below `b` on the left contour: the gap node's own band, then a child.
+    fn next_left_contour<const P: bool>(&self, b: usize) -> usize {
+        if P && b.is_multiple_of(2) {
+            return b + 1;
+        }
+
+        let v = Self::owner::<P>(b);
+
+        if self.child_count[v] == 0 {
+            self.tl[v]
         } else {
-            self.first_child[i] as i32
+            Self::gap::<P>(self.first_child[v])
         }
     }
 
-    fn next_right_contour(&self, i: usize) -> i32 {
-        if self.child_count[i] == 0 {
-            self.tr[i]
+    /// Symmetrical to [`Flat::next_left_contour`].
+    fn next_right_contour<const P: bool>(&self, b: usize) -> usize {
+        if P && b.is_multiple_of(2) {
+            return b + 1;
+        }
+
+        let v = Self::owner::<P>(b);
+
+        if self.child_count[v] == 0 {
+            self.tr[v]
         } else {
-            (self.first_child[i] + self.child_count[i] - 1) as i32
+            Self::gap::<P>(self.first_child[v] + self.child_count[v] - 1)
         }
     }
 
-    fn move_subtree(&mut self, t: usize, k: usize, si: usize, dist: f64) {
-        let base = self.first_child[t] as usize;
+    fn move_subtree<const P: bool>(&mut self, t: usize, k: usize, si: usize, dist: f64) {
+        let base = self.first_child[t];
         let i = base + k;
 
-        self.modifier[i] += dist;
+        self.modifier[Self::gap::<P>(i)] += dist;
         self.msel[i] += dist;
         self.mser[i] += dist;
 
@@ -849,11 +986,13 @@ impl Flat {
         }
     }
 
-    fn set_left_thread(&mut self, base: usize, k: usize, cl: usize, modsumcl: f64) {
+    fn set_left_thread<const P: bool>(&mut self, base: usize, k: usize, cl: usize, modsumcl: f64) {
         let i = base + k;
-        let li = self.el[base] as usize;
+        // An extreme node is a leaf, so it is the lower band that carries the thread.
+        let le = self.el[base];
+        let li = Self::con::<P>(le);
 
-        self.tl[li] = cl as i32;
+        self.tl[le] = cl;
 
         let diff = (modsumcl - self.modifier[cl]) - self.msel[base];
         self.modifier[li] += diff;
@@ -863,11 +1002,12 @@ impl Flat {
         self.msel[base] = self.msel[i];
     }
 
-    fn set_right_thread(&mut self, base: usize, k: usize, sr: usize, modsumsr: f64) {
+    fn set_right_thread<const P: bool>(&mut self, base: usize, k: usize, sr: usize, modsumsr: f64) {
         let i = base + k;
-        let ri = self.er[i] as usize;
+        let re = self.er[i];
+        let ri = Self::con::<P>(re);
 
-        self.tr[ri] = sr as i32;
+        self.tr[re] = sr;
 
         let diff = (modsumsr - self.modifier[sr]) - self.mser[i];
         self.modifier[ri] += diff;
@@ -882,6 +1022,15 @@ impl Flat {
     /// Within a level the modifier sum is a gather from the parents, which stays scalar;
     /// the coordinate that follows from it is elementwise, and so is the minimum.
     fn second_sweep(&mut self, centeredxy: bool, k: Kernels) -> f64 {
+        if self.paired {
+            self.second_sweep_paired(centeredxy)
+        } else {
+            self.second_sweep_plain(centeredxy, k)
+        }
+    }
+
+    /// [`Flat::second_sweep`], over a mirror of one band per entry.
+    fn second_sweep_plain(&mut self, centeredxy: bool, k: Kernels) -> f64 {
         self.modsum[0] = self.modifier[0];
 
         let mut best = f64::INFINITY;
@@ -891,7 +1040,7 @@ impl Flat {
 
             if l > 0 {
                 for i in level.clone() {
-                    self.modsum[i] = self.modsum[self.parent[i] as usize] + self.modifier[i];
+                    self.modsum[i] = self.modsum[self.parent[i]] + self.modifier[i];
                 }
             }
 
@@ -926,6 +1075,61 @@ impl Flat {
         best
     }
 
+    /// [`Flat::second_sweep`], over the two bands of every entry.
+    ///
+    /// The modifier sum runs through both bands, and both take part in the minimum -- a
+    /// gap node contributes its own breadth to it in the recursion, even though nothing
+    /// ever draws it. The elementwise kernels sit this one out: within a level the bands
+    /// are strided, and a gather is not what they are for.
+    fn second_sweep_paired(&mut self, centeredxy: bool) -> f64 {
+        let mut best = f64::INFINITY;
+
+        for l in 0..self.levels.len() - 1 {
+            let level = self.levels[l]..self.levels[l + 1];
+
+            for v in level.clone() {
+                let (g, t) = (2 * v, 2 * v + 1);
+
+                let up = if v == 0 {
+                    0.0
+                } else {
+                    self.modsum[self.parent[v]]
+                };
+
+                let msg = up + self.modifier[g];
+                let msc = msg + self.modifier[t];
+                self.modsum[v] = msc;
+
+                let mut bg = self.prelim[g] + msg;
+                let mut b = self.prelim[t] + msc;
+
+                if centeredxy {
+                    bg += self.bext[g] / 2.0;
+                    b += self.bext[t] / 2.0;
+                    self.depth[v] += self.dext[t] / 2.0;
+                }
+
+                self.breadth[v] = b;
+                best = best.min(bg).min(b);
+            }
+
+            // `add_child_spacing`, into the gap band of every child; see the plain sweep.
+            for v in level {
+                let c = self.children(v);
+                let mut d = 0.0;
+                let mut modsumdelta = 0.0;
+
+                for j in c {
+                    d += self.shift[j];
+                    modsumdelta += d + self.change[j];
+                    self.modifier[2 * j] += modsumdelta;
+                }
+            }
+        }
+
+        best
+    }
+
     /// `third_walk`: one flat pass over everything, which is as elementwise as it gets.
     fn third_sweep(&mut self, dbreadth: f64, ddepth: f64, k: Kernels) {
         k.sub_scalar(&mut self.breadth, dbreadth);
@@ -951,8 +1155,8 @@ impl Flat {
                 // The recursive path fills these in for children only, leaving whatever
                 // the root already carried; do the same rather than clearing it.
                 if self.parent[i] != NONE {
-                    node.parent = Some(self.id[self.parent[i] as usize]);
-                    node.childno = self.childno[i] as usize;
+                    node.parent = Some(self.id[self.parent[i]]);
+                    node.childno = self.childno[i];
                 }
             }
         }

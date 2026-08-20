@@ -158,6 +158,33 @@ phase and nothing per node: the contour walk is not instrumented, and `NLTT_TRAC
 unset changes no timing that `make bench` can see. `Engine::profile` reports the same
 phases as a value instead of a line, which is what `make bench-phases` tabulates.
 
+## The mirror, halved
+
+`layout_api` takes its tree as arrays and reifies an invisible "gap" node above every node
+to space the levels apart, which doubles the largest thing in memory before the algorithm
+has done anything. `flat` does not reify it: it becomes the upper *band* of the entry it
+belongs to, so the mirror holds one entry per node with `bext`, `dext`, `bot`, `prelim` and
+`modifier` per band and everything else — `el`, `er`, `msel`, `mser`, the threads, the
+children, the parent — shared between the two.
+
+This is a fold, not a merge, and the difference is the whole point. Folding the gap into
+the node's own box (`h + gap`, one band) is *not* the same drawing: the gap node is a
+narrower box in the general case, and it carries **no margin**, so a neighbouring subtree
+may nestle into the band it occupies. Over 200 random trees from `treegen`, whose margins
+are nonzero, a fold moves nodes in 177 of them. The banded entry keeps the gap node's own
+width and its lack of a margin, and the contour walk still compares the two bands
+separately, so the coordinates stay identical bit for bit —
+`tests/flat.rs::the_paired_mirror_agrees_with_the_reified_gap_nodes` checks that against
+the reified version over every gap-width convention a caller can pass.
+
+Peak RSS of `layout_api_flat` over a 4 000 000-node tree, on an M-series laptop: **1481 MB
+before, 1122 MB after**, and the sweeps run about 30% faster for having half the entries to
+visit. The links are `usize` rather than `i32`/`u32` in the same breath: a mirror is now
+bounded by the memory it fits in rather than by 2^31 nodes, where before it would have
+truncated silently. That costs the contour walk a quarter of its time — it is memory bound,
+and eight-byte links halve what a cache line holds — which the halved mirror pays back on
+the API path and does not on the `Arena` path, where there are no gap nodes to fold.
+
 ## Benchmarks
 
 One tree of `n` nodes, laid out repeatedly; the tree is built outside the timed region and
@@ -170,6 +197,11 @@ drawing, computed five different ways.
 Xeon Gold 6238R at 2.2 GHz, clang 18 `-O2` (gcc 13 is within 5%), rustc 1.97 release,
 ns/node, best of 7, averaged over both orientations. `-r` marks the rows that reuse their
 mirror across calls.
+
+> These rows predate two changes to the mirror — `usize` links and the paired entries
+> described in [the mirror, halved](#the-mirror-halved) — which move the `rust-flat` rows up
+> by about a quarter and the `rust-api-flat` rows down by about a third. Rerun `make bench`
+> before quoting them.
 
 **`layout`, over a tree already in memory:**
 
