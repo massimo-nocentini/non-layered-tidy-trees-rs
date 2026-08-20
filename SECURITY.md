@@ -22,9 +22,10 @@ The realistic failure modes are therefore
   from the caller and are validated only by the documented `assert!`s;
 * a stack overflow from a deep tree, which the recursive walks can reach; `tests/depth.rs`
   documents the depth the crate is exercised at and the stack size it needs;
-* any unsoundness in the AVX2 kernels behind `--features simd`, which are the only `unsafe`
-  in the crate. They are off by default, and with the feature off there is no `unsafe`
-  anywhere in the sources.
+* any of the above under a build that is not the default one.
 
-Reports of the first and third kinds are welcome even without a proof of exploitability — a
-tree that panics is enough.
+The crate has no dependencies and contains no `unsafe` at all, which is what leaves this
+list as short as it is.
+
+Reports of the first kind are welcome even without a proof of exploitability — a tree that
+panics is enough.

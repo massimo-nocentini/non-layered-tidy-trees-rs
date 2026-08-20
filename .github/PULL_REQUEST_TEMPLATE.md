@@ -4,7 +4,7 @@
 
 ## Checklist
 
-- [ ] `make test` passes — the suite runs with the scalar kernels and then with `--features simd`, and both have to pass identically
+- [ ] `make test` passes
 - [ ] `cargo fmt --all -- --check` and `cargo clippy --all-targets --all-features` are clean
 - [ ] The coordinates are unchanged, or the change to them is deliberate and explained above
 

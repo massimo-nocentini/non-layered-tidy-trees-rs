@@ -14,14 +14,12 @@
 //! * every walk becomes a sweep over that mirror, forwards or backwards, with no recursion
 //!   at all — which also removes the stack-depth ceiling the recursive path has;
 //! * `bottom` is precomputed once into `bot[]`, which takes two branches out of the
-//!   innermost contour step;
-//! * the elementwise sweeps go through [`Kernels`], which dispatches to AVX2 when the crate
-//!   is built with `--features simd` and the CPU has it.
+//!   innermost contour step.
 //!
-//! This is steps 2 to 4 of `simd-plan.md`, whose verdict is worth repeating: `separate` is
-//! the hot routine, it is a serial contour walk, and it cannot be vectorized at any width.
-//! What is vectorized here is the minority of the runtime that *is* elementwise. See
-//! `rust/README.md` for what that turns out to be worth.
+//! The elementwise sweeps are plain loops, left for the compiler to widen. Hand-written
+//! AVX2 kernels used to sit behind a `simd` feature here; they were bit-identical and
+//! worth nothing, because `separate` is the hot routine, it is a serial contour walk, and
+//! it cannot be vectorized at any width. See the README for the numbers that retired them.
 //!
 //! # Order of visits
 //!
@@ -44,16 +42,6 @@ const NONE: usize = usize::MAX;
 /// are visited internally, which no caller can see: it takes no callbacks.
 pub fn layout_flat(arena: &mut Arena, input: &LayoutInput) {
     Engine::new().layout(arena, input);
-}
-
-/// [`layout_flat`], with the elementwise sweeps vectorized where the CPU allows it.
-///
-/// Falls back to the scalar kernels when the target has no AVX2, so the result is the same
-/// everywhere — the kernels are elementwise, and widening an elementwise operation does not
-/// change a single bit of it.
-#[cfg(feature = "simd")]
-pub fn layout_flat_simd(arena: &mut Arena, input: &LayoutInput) {
-    Engine::with_simd().layout(arena, input);
 }
 
 /// A reusable mirror, for laying out repeatedly.
@@ -82,35 +70,19 @@ pub fn layout_flat_simd(arena: &mut Arena, input: &LayoutInput) {
 #[derive(Debug, Default)]
 pub struct Engine {
     flat: Flat,
-    kernels: Kernels,
 }
 
 impl Engine {
-    /// An engine using the scalar kernels.
+    /// An engine that has yet to allocate anything.
     pub fn new() -> Engine {
         Engine {
             flat: Flat::default(),
-            kernels: Kernels::scalar(),
         }
-    }
-
-    /// An engine using AVX2 where the CPU has it.
-    #[cfg(feature = "simd")]
-    pub fn with_simd() -> Engine {
-        Engine {
-            flat: Flat::default(),
-            kernels: Kernels::detect(),
-        }
-    }
-
-    /// Which kernels this engine dispatches to.
-    pub fn kernels(&self) -> Kernels {
-        self.kernels
     }
 
     /// Lays out the tree, reusing whatever this engine already allocated.
     pub fn layout(&mut self, arena: &mut Arena, input: &LayoutInput) {
-        run(&mut self.flat, arena, input, self.kernels)
+        run(&mut self.flat, arena, input)
     }
 
     /// [`layout_api_flat`], reusing whatever this engine already allocated.
@@ -136,8 +108,7 @@ impl Engine {
         let mut sum = std::time::Duration::ZERO;
 
         trace!(
-            "layout_api_flat  n={n} rooti={rooti} vertically={vertically} centeredxy={centeredxy} origin=({x}, {y}) kernels={}",
-            kernel_name(self.kernels)
+            "layout_api_flat  n={n} rooti={rooti} vertically={vertically} centeredxy={centeredxy} origin=({x}, {y})"
         );
 
         let t = crate::trace::start();
@@ -145,8 +116,7 @@ impl Engine {
             .rebuild_from_arrays(n, wh, whg, children, rooti, vertically);
         sum += phase!(t, "build", "{}", mirror(&self.flat));
 
-        let (minbreadth, swept) =
-            sweeps(&mut self.flat, vertically, centeredxy, x, y, self.kernels);
+        let (minbreadth, swept) = sweeps(&mut self.flat, vertically, centeredxy, x, y);
         let _ = minbreadth;
         sum += swept;
 
@@ -159,11 +129,11 @@ impl Engine {
 
     /// [`Engine::layout`], reporting how long each sweep took.
     ///
-    /// A benchmarking aid: `simd-plan.md` asks for the share of runtime each phase holds,
-    /// and this is what answers it. See `src/bin/bench.rs`.
+    /// A benchmarking aid: it answers where the time goes, phase by phase. See
+    /// `src/bin/bench.rs`.
     pub fn profile(&mut self, arena: &mut Arena, input: &LayoutInput) -> Phases {
         let mut phases = Phases::default();
-        run_profiled(&mut self.flat, arena, input, self.kernels, &mut phases);
+        run_profiled(&mut self.flat, arena, input, &mut phases);
         phases
     }
 }
@@ -205,49 +175,31 @@ impl Phases {
     }
 }
 
-fn run(flat: &mut Flat, arena: &mut Arena, input: &LayoutInput, k: Kernels) {
+fn run(flat: &mut Flat, arena: &mut Arena, input: &LayoutInput) {
     let on = crate::trace::enabled();
     let mut sum = std::time::Duration::ZERO;
 
     trace!(
-        "layout_flat  root=#{} arena={} vertically={} centeredxy={} origin=({}, {}) kernels={}",
+        "layout_flat  root=#{} arena={} vertically={} centeredxy={} origin=({}, {})",
         arena[input.root].idx,
         arena.len(),
         input.vertically,
         input.centeredxy,
         input.x,
-        input.y,
-        kernel_name(k)
+        input.y
     );
 
     let t = crate::trace::start();
     flat.rebuild(arena, input.root, input.vertically);
     sum += phase!(t, "build", "{}", mirror(flat));
 
-    sum += sweeps(
-        flat,
-        input.vertically,
-        input.centeredxy,
-        input.x,
-        input.y,
-        k,
-    )
-    .1;
+    sum += sweeps(flat, input.vertically, input.centeredxy, input.x, input.y).1;
 
     let t = crate::trace::start();
     flat.write_back(arena, input.vertically, input.centeredxy);
     sum += phase!(t, "write", "{} nodes", flat.n);
 
     total!(on, sum);
-}
-
-/// Which kernels a trace line is about.
-fn kernel_name(k: Kernels) -> &'static str {
-    if k.is_simd() {
-        "avx2"
-    } else {
-        "scalar"
-    }
 }
 
 /// The shape of the mirror, for the trace.
@@ -265,12 +217,11 @@ fn sweeps(
     centeredxy: bool,
     x: f64,
     y: f64,
-    k: Kernels,
 ) -> (f64, std::time::Duration) {
     let mut sum = std::time::Duration::ZERO;
 
     let t = crate::trace::start();
-    flat.setup_sweep(k);
+    flat.setup_sweep();
     sum += phase!(t, "setup");
 
     let t = crate::trace::start();
@@ -278,7 +229,7 @@ fn sweeps(
     sum += phase!(t, "first");
 
     let t = crate::trace::start();
-    let minbreadth = flat.second_sweep(centeredxy, k);
+    let minbreadth = flat.second_sweep(centeredxy);
     sum += phase!(t, "second", "minbreadth={minbreadth}");
 
     // The counterpart of `third_walk`: the depth axis is offset by the input alone, the
@@ -290,7 +241,7 @@ fn sweeps(
 
     let t = crate::trace::start();
     if dbreadth != 0.0 || ddepth != 0.0 {
-        flat.third_sweep(dbreadth, ddepth, k);
+        flat.third_sweep(dbreadth, ddepth);
         sum += phase!(t, "third", "dbreadth={dbreadth} ddepth={ddepth}");
     } else {
         sum += phase!(t, "third", "already at the origin");
@@ -328,13 +279,7 @@ pub fn layout_api_flat(
 }
 
 /// [`run`], with a stopwatch between the phases; see [`Engine::profile`].
-fn run_profiled(
-    flat: &mut Flat,
-    arena: &mut Arena,
-    input: &LayoutInput,
-    k: Kernels,
-    phases: &mut Phases,
-) {
+fn run_profiled(flat: &mut Flat, arena: &mut Arena, input: &LayoutInput, phases: &mut Phases) {
     use std::time::Instant;
 
     let t = Instant::now();
@@ -342,7 +287,7 @@ fn run_profiled(
     phases.build = t.elapsed();
 
     let t = Instant::now();
-    flat.setup_sweep(k);
+    flat.setup_sweep();
     phases.setup = t.elapsed();
 
     let t = Instant::now();
@@ -350,7 +295,7 @@ fn run_profiled(
     phases.first = t.elapsed();
 
     let t = Instant::now();
-    let minbreadth = flat.second_sweep(input.centeredxy, k);
+    let minbreadth = flat.second_sweep(input.centeredxy);
     phases.second = t.elapsed();
 
     let (in_breadth, in_depth) = if input.vertically {
@@ -364,7 +309,7 @@ fn run_profiled(
 
     let t = Instant::now();
     if dbreadth != 0.0 || ddepth != 0.0 {
-        flat.third_sweep(dbreadth, ddepth, k);
+        flat.third_sweep(dbreadth, ddepth);
     }
     phases.third = t.elapsed();
 
@@ -376,14 +321,13 @@ fn run_profiled(
     // them a second time.
     if crate::trace::enabled() {
         crate::trace::header(format_args!(
-            "profile      root=#{} arena={} vertically={} centeredxy={} origin=({}, {}) kernels={}",
+            "profile      root=#{} arena={} vertically={} centeredxy={} origin=({}, {})",
             arena[input.root].idx,
             arena.len(),
             input.vertically,
             input.centeredxy,
             input.x,
-            input.y,
-            kernel_name(k)
+            input.y
         ));
 
         for (name, d) in phases.iter() {
@@ -758,16 +702,16 @@ impl Flat {
     }
 
     /// `setup_walk`: the depth axis follows from the node extents, one level below the next.
-    fn setup_sweep(&mut self, k: Kernels) {
+    fn setup_sweep(&mut self) {
         if self.paired {
             self.setup_sweep_paired();
         } else {
-            self.setup_sweep_plain(k);
+            self.setup_sweep_plain();
         }
     }
 
     /// [`Flat::setup_sweep`], over a mirror of one band per entry.
-    fn setup_sweep_plain(&mut self, k: Kernels) {
+    fn setup_sweep_plain(&mut self) {
         self.depth[0] = 0.0;
         self.bot[0] = self.dext[0];
 
@@ -780,8 +724,8 @@ impl Flat {
 
             // Every child of a node sits directly below it, so this is a fill over a
             // contiguous range and an elementwise add over the same one.
-            k.fill(&mut self.depth[c.clone()], b);
-            k.add_scalar(&mut self.bot[c.clone()], &self.dext[c], b);
+            fill(&mut self.depth[c.clone()], b);
+            add_scalar(&mut self.bot[c.clone()], &self.dext[c], b);
         }
     }
 
@@ -1021,16 +965,16 @@ impl Flat {
     ///
     /// Within a level the modifier sum is a gather from the parents, which stays scalar;
     /// the coordinate that follows from it is elementwise, and so is the minimum.
-    fn second_sweep(&mut self, centeredxy: bool, k: Kernels) -> f64 {
+    fn second_sweep(&mut self, centeredxy: bool) -> f64 {
         if self.paired {
             self.second_sweep_paired(centeredxy)
         } else {
-            self.second_sweep_plain(centeredxy, k)
+            self.second_sweep_plain(centeredxy)
         }
     }
 
     /// [`Flat::second_sweep`], over a mirror of one band per entry.
-    fn second_sweep_plain(&mut self, centeredxy: bool, k: Kernels) -> f64 {
+    fn second_sweep_plain(&mut self, centeredxy: bool) -> f64 {
         self.modsum[0] = self.modifier[0];
 
         let mut best = f64::INFINITY;
@@ -1044,18 +988,18 @@ impl Flat {
                 }
             }
 
-            k.add(
+            add(
                 &mut self.breadth[level.clone()],
                 &self.prelim[level.clone()],
                 &self.modsum[level.clone()],
             );
 
             if centeredxy {
-                k.add_half(&mut self.breadth[level.clone()], &self.bext[level.clone()]);
-                k.add_half(&mut self.depth[level.clone()], &self.dext[level.clone()]);
+                add_half(&mut self.breadth[level.clone()], &self.bext[level.clone()]);
+                add_half(&mut self.depth[level.clone()], &self.dext[level.clone()]);
             }
 
-            best = best.min(k.min(&self.breadth[level.clone()]));
+            best = best.min(min(&self.breadth[level.clone()]));
 
             // `add_child_spacing`, the second-order prefix scan that has to stay scalar:
             // any parallel scan reassociates the additions and changes the last ULP. It
@@ -1079,7 +1023,7 @@ impl Flat {
     ///
     /// The modifier sum runs through both bands, and both take part in the minimum -- a
     /// gap node contributes its own breadth to it in the recursion, even though nothing
-    /// ever draws it. The elementwise kernels sit this one out: within a level the bands
+    /// ever draws it. The elementwise helpers sit this one out: within a level the bands
     /// are strided, and a gather is not what they are for.
     fn second_sweep_paired(&mut self, centeredxy: bool) -> f64 {
         let mut best = f64::INFINITY;
@@ -1131,9 +1075,9 @@ impl Flat {
     }
 
     /// `third_walk`: one flat pass over everything, which is as elementwise as it gets.
-    fn third_sweep(&mut self, dbreadth: f64, ddepth: f64, k: Kernels) {
-        k.sub_scalar(&mut self.breadth, dbreadth);
-        k.sub_scalar(&mut self.depth, ddepth);
+    fn third_sweep(&mut self, dbreadth: f64, ddepth: f64) {
+        sub_scalar(&mut self.breadth, dbreadth);
+        sub_scalar(&mut self.depth, ddepth);
     }
 
     fn write_back(&self, arena: &mut Arena, vertically: bool, centeredxy: bool) {
@@ -1181,220 +1125,49 @@ fn update_chain(chain: &mut Vec<ChainLink>, min: f64, i: usize) {
     chain.push(ChainLink { low: min, index: i });
 }
 
-/// The elementwise sweeps, scalar or vectorized.
-///
-/// Every kernel here is elementwise or a `min` reduction, which is why widening them
-/// cannot change a result: elementwise operations do not reassociate, and `min` is exact
-/// under any association. The prefix scan of `add_child_spacing` is deliberately not here.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Kernels {
-    simd: bool,
-}
+// The elementwise steps of the sweeps, as plain loops.
+//
+// Every one of these is elementwise or a `min` reduction, which is why the compiler is
+// free to widen them: elementwise operations do not reassociate, and `min` is exact under
+// any association. The prefix scan of `add_child_spacing` is deliberately not here.
 
-impl Kernels {
-    /// Plain loops, which the compiler is free to vectorize on its own.
-    pub fn scalar() -> Kernels {
-        Kernels { simd: false }
-    }
-
-    /// AVX2 where the CPU has it, plain loops otherwise.
-    #[cfg(feature = "simd")]
-    pub fn detect() -> Kernels {
-        #[cfg(target_arch = "x86_64")]
-        let simd = simd::available();
-        #[cfg(not(target_arch = "x86_64"))]
-        let simd = false;
-
-        Kernels { simd }
-    }
-
-    /// Whether the vectorized kernels are the ones in use.
-    pub fn is_simd(self) -> bool {
-        self.simd
-    }
-
-    /// `dst[i] = v`
-    fn fill(self, dst: &mut [f64], v: f64) {
-        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-        if self.simd {
-            // SAFETY: `simd` is only set when the CPU reports AVX2.
-            unsafe { simd::fill(dst, v) };
-            return;
-        }
-        for d in dst {
-            *d = v;
-        }
-    }
-
-    /// `dst[i] = v + src[i]`
-    fn add_scalar(self, dst: &mut [f64], src: &[f64], v: f64) {
-        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-        if self.simd {
-            // SAFETY: `simd` is only set when the CPU reports AVX2.
-            unsafe { simd::add_scalar(dst, src, v) };
-            return;
-        }
-        for (d, s) in dst.iter_mut().zip(src) {
-            *d = v + *s;
-        }
-    }
-
-    /// `dst[i] = a[i] + b[i]`
-    fn add(self, dst: &mut [f64], a: &[f64], b: &[f64]) {
-        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-        if self.simd {
-            // SAFETY: `simd` is only set when the CPU reports AVX2.
-            unsafe { simd::add(dst, a, b) };
-            return;
-        }
-        for (d, (x, y)) in dst.iter_mut().zip(a.iter().zip(b)) {
-            *d = *x + *y;
-        }
-    }
-
-    /// `dst[i] += src[i] / 2`
-    fn add_half(self, dst: &mut [f64], src: &[f64]) {
-        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-        if self.simd {
-            // SAFETY: `simd` is only set when the CPU reports AVX2.
-            unsafe { simd::add_half(dst, src) };
-            return;
-        }
-        for (d, s) in dst.iter_mut().zip(src) {
-            *d += *s / 2.0;
-        }
-    }
-
-    /// `dst[i] -= v`
-    fn sub_scalar(self, dst: &mut [f64], v: f64) {
-        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-        if self.simd {
-            // SAFETY: `simd` is only set when the CPU reports AVX2.
-            unsafe { simd::sub_scalar(dst, v) };
-            return;
-        }
-        for d in dst {
-            *d -= v;
-        }
-    }
-
-    /// The smallest element, or `+inf` for an empty slice.
-    fn min(self, v: &[f64]) -> f64 {
-        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-        if self.simd {
-            // SAFETY: `simd` is only set when the CPU reports AVX2.
-            return unsafe { simd::min(v) };
-        }
-        v.iter()
-            .fold(f64::INFINITY, |m, &c| if c < m { c } else { m })
+/// `dst[i] = v`
+fn fill(dst: &mut [f64], v: f64) {
+    for d in dst {
+        *d = v;
     }
 }
 
-/// AVX2 kernels: four doubles at a time, with a scalar tail.
-///
-/// Every one of these is an elementwise operation or a `min` reduction, so the result is
-/// bit-identical to the scalar loop above it whatever the lane count.
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-mod simd {
-    use std::arch::x86_64::*;
-
-    pub fn available() -> bool {
-        is_x86_feature_detected!("avx2")
+/// `dst[i] = v + src[i]`
+fn add_scalar(dst: &mut [f64], src: &[f64], v: f64) {
+    for (d, s) in dst.iter_mut().zip(src) {
+        *d = v + *s;
     }
+}
 
-    const LANES: usize = 4;
-
-    #[target_feature(enable = "avx2")]
-    pub unsafe fn fill(dst: &mut [f64], v: f64) {
-        let w = _mm256_set1_pd(v);
-        let chunks = dst.len() / LANES;
-        for c in 0..chunks {
-            _mm256_storeu_pd(dst.as_mut_ptr().add(c * LANES), w);
-        }
-        for d in &mut dst[chunks * LANES..] {
-            *d = v;
-        }
+/// `dst[i] = a[i] + b[i]`
+fn add(dst: &mut [f64], a: &[f64], b: &[f64]) {
+    for (d, (x, y)) in dst.iter_mut().zip(a.iter().zip(b)) {
+        *d = *x + *y;
     }
+}
 
-    #[target_feature(enable = "avx2")]
-    pub unsafe fn add_scalar(dst: &mut [f64], src: &[f64], v: f64) {
-        let n = dst.len().min(src.len());
-        let w = _mm256_set1_pd(v);
-        let chunks = n / LANES;
-        for c in 0..chunks {
-            let s = _mm256_loadu_pd(src.as_ptr().add(c * LANES));
-            _mm256_storeu_pd(dst.as_mut_ptr().add(c * LANES), _mm256_add_pd(w, s));
-        }
-        for i in chunks * LANES..n {
-            *dst.get_unchecked_mut(i) = v + *src.get_unchecked(i);
-        }
+/// `dst[i] += src[i] / 2`
+fn add_half(dst: &mut [f64], src: &[f64]) {
+    for (d, s) in dst.iter_mut().zip(src) {
+        *d += *s / 2.0;
     }
+}
 
-    #[target_feature(enable = "avx2")]
-    pub unsafe fn add(dst: &mut [f64], a: &[f64], b: &[f64]) {
-        let n = dst.len().min(a.len()).min(b.len());
-        let chunks = n / LANES;
-        for c in 0..chunks {
-            let x = _mm256_loadu_pd(a.as_ptr().add(c * LANES));
-            let y = _mm256_loadu_pd(b.as_ptr().add(c * LANES));
-            _mm256_storeu_pd(dst.as_mut_ptr().add(c * LANES), _mm256_add_pd(x, y));
-        }
-        for i in chunks * LANES..n {
-            *dst.get_unchecked_mut(i) = *a.get_unchecked(i) + *b.get_unchecked(i);
-        }
+/// `dst[i] -= v`
+fn sub_scalar(dst: &mut [f64], v: f64) {
+    for d in dst {
+        *d -= v;
     }
+}
 
-    #[target_feature(enable = "avx2")]
-    pub unsafe fn add_half(dst: &mut [f64], src: &[f64]) {
-        let n = dst.len().min(src.len());
-        let half = _mm256_set1_pd(0.5);
-        let chunks = n / LANES;
-        for c in 0..chunks {
-            let d = _mm256_loadu_pd(dst.as_ptr().add(c * LANES));
-            let s = _mm256_loadu_pd(src.as_ptr().add(c * LANES));
-            // `* 0.5` and `/ 2.0` are the same operation on a binary float: an exact
-            // exponent decrement, with no rounding to disagree about.
-            _mm256_storeu_pd(
-                dst.as_mut_ptr().add(c * LANES),
-                _mm256_add_pd(d, _mm256_mul_pd(s, half)),
-            );
-        }
-        for i in chunks * LANES..n {
-            *dst.get_unchecked_mut(i) += *src.get_unchecked(i) / 2.0;
-        }
-    }
-
-    #[target_feature(enable = "avx2")]
-    pub unsafe fn sub_scalar(dst: &mut [f64], v: f64) {
-        let w = _mm256_set1_pd(v);
-        let chunks = dst.len() / LANES;
-        for c in 0..chunks {
-            let d = _mm256_loadu_pd(dst.as_ptr().add(c * LANES));
-            _mm256_storeu_pd(dst.as_mut_ptr().add(c * LANES), _mm256_sub_pd(d, w));
-        }
-        for d in &mut dst[chunks * LANES..] {
-            *d -= v;
-        }
-    }
-
-    #[target_feature(enable = "avx2")]
-    pub unsafe fn min(v: &[f64]) -> f64 {
-        let chunks = v.len() / LANES;
-
-        let mut acc = _mm256_set1_pd(f64::INFINITY);
-        for c in 0..chunks {
-            acc = _mm256_min_pd(acc, _mm256_loadu_pd(v.as_ptr().add(c * LANES)));
-        }
-
-        let mut lanes = [0.0f64; LANES];
-        _mm256_storeu_pd(lanes.as_mut_ptr(), acc);
-
-        let mut m = f64::INFINITY;
-        for &c in lanes.iter().chain(&v[chunks * LANES..]) {
-            if c < m {
-                m = c;
-            }
-        }
-        m
-    }
+/// The smallest element, or `+inf` for an empty slice.
+fn min(v: &[f64]) -> f64 {
+    v.iter()
+        .fold(f64::INFINITY, |m, &c| if c < m { c } else { m })
 }

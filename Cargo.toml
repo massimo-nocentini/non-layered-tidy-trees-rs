@@ -12,12 +12,6 @@ documentation = "https://docs.rs/non-layered-tidy-trees"
 # `docs/` is 3.5 MB of committed rustdoc, there for GitHub Pages and not for the crate.
 exclude = ["docs/", ".github/"]
 
-[features]
-# Explicit AVX2 kernels for the elementwise sweeps of `flat`, with runtime detection.
-# Off by default: it is the only `unsafe` in the crate, and `simd-plan.md` explains why
-# the win is small. `cargo bench`-style comparison lives in `src/bin/bench.rs`.
-simd = []
-
 [dependencies]
 
 [profile.test]

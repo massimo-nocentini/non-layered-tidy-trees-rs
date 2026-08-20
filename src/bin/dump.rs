@@ -22,15 +22,6 @@ use non_layered_tidy_trees::{flat, layout, Arena, LayoutInput, NodeId};
 type Impl = fn(&mut Arena, &LayoutInput);
 
 fn pick(args: &[String]) -> (Impl, &'static str) {
-    if args.iter().any(|a| a == "--simd") {
-        #[cfg(feature = "simd")]
-        return (flat::layout_flat_simd, "flat+simd");
-        #[cfg(not(feature = "simd"))]
-        {
-            eprintln!("built without `--features simd`; falling back to the scalar kernels");
-            return (flat::layout_flat, "flat");
-        }
-    }
     if args.iter().any(|a| a == "--flat") {
         return (flat::layout_flat, "flat");
     }
@@ -196,10 +187,7 @@ fn main() -> ExitCode {
     let all: Vec<String> = env::args().skip(1).collect();
     let (run, name) = pick(&all);
 
-    let args: Vec<String> = all
-        .into_iter()
-        .filter(|a| !matches!(a.as_str(), "--flat" | "--simd"))
-        .collect();
+    let args: Vec<String> = all.into_iter().filter(|a| a != "--flat").collect();
 
     match args.first().map(String::as_str) {
         Some("--check") => {
@@ -219,7 +207,7 @@ fn main() -> ExitCode {
             );
             println!("       dump --check <file> [trials]   compare against a dump of the C build");
             println!(
-                "       --flat / --simd                use the sweeps instead of the recursion"
+                "       --flat                         use the sweeps instead of the recursion"
             );
             ExitCode::SUCCESS
         }

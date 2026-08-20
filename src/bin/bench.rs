@@ -1,4 +1,4 @@
-//! Wall clock over one large tree, the workload `simd-plan.md` scopes for.
+//! Wall clock over one large tree.
 //!
 //! Prints the same table as `test/bench.c`, over the very same trees -- `treegen::bench_tree`
 //! and `tg_bench_tree` draw from the same generator in the same order -- so the rows can be
@@ -7,9 +7,8 @@
 //! carry the same checksum for a given `(n, vert)`, whatever the implementation.
 //!
 //! ```sh
-//! cargo run --release --bin bench                      # the recursive and flat paths
-//! cargo run --release --features simd --bin bench      # and the explicitly vectorized one
-//! make -C ../test bench                                # the C row of the same table
+//! cargo run --release --bin bench      # the recursive and the flat paths
+//! make -C ../test bench                 # the C row of the same table
 //! ```
 
 use std::env;
@@ -41,30 +40,10 @@ fn impls() -> Vec<(&'static str, Runner)> {
         Box::new(move |a: &mut Arena, i: &LayoutInput| engine.layout(a, i)),
     ));
 
-    #[cfg(feature = "simd")]
-    {
-        v.push(("rust-simd", Box::new(flat::layout_flat_simd)));
-
-        let mut engine = Engine::with_simd();
-        v.push((
-            "rust-simd-r",
-            Box::new(move |a: &mut Arena, i: &LayoutInput| engine.layout(a, i)),
-        ));
-    }
-
     v
 }
 
 fn header() {
-    #[cfg(feature = "simd")]
-    println!(
-        "# kernels: {}",
-        if Engine::with_simd().kernels().is_simd() {
-            "avx2"
-        } else {
-            "scalar (no AVX2 on this CPU)"
-        }
-    );
     println!(
         "# {:<16} {:>9} {:>5} {:>11} {:>11} {:>16}",
         "impl", "n", "vert", "ns/node", "ms", "checksum"
@@ -141,17 +120,6 @@ fn api_impls() -> Vec<(&'static str, ApiRunner)> {
         }),
     ));
 
-    #[cfg(feature = "simd")]
-    {
-        let mut engine = Engine::with_simd();
-        v.push((
-            "rust-api-simd-r",
-            Box::new(move |n, wh: &mut [f64], whg: &[f64], c: &[usize], vert| {
-                engine.layout_api(n, wh, whg, c, 1, vert, false, 0.0, 0.0)
-            }),
-        ));
-    }
-
     v
 }
 
@@ -225,7 +193,7 @@ fn checksum(arena: &Arena) -> u64 {
         .fold(0u64, |ck, n| ck ^ n.x.to_bits() ^ n.y.to_bits())
 }
 
-/// Where the time goes inside one flat layout, which is what `simd-plan.md` asks for.
+/// Where the time goes inside one flat layout.
 fn phases(reps: usize) {
     println!("# phase breakdown of one flat layout, best of {reps}, us");
     println!(
@@ -233,10 +201,7 @@ fn phases(reps: usize) {
         "impl", "n", "build", "setup", "first", "second", "third", "write"
     );
 
-    #[allow(unused_mut)]
     let mut engines: Vec<(&str, Engine)> = vec![("flat", Engine::new())];
-    #[cfg(feature = "simd")]
-    engines.push(("simd", Engine::with_simd()));
 
     for (name, engine) in engines.iter_mut() {
         for n in [10_000usize, 1_000_000] {

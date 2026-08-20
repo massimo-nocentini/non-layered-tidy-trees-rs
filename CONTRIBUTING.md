@@ -11,16 +11,16 @@ fix in `separate` follow the C line by line, in the same order, so the two produ
 bit-identical coordinates. A patch that reorders a floating point expression changes the
 output even when the algebra says otherwise, and that is a breaking change, not a cleanup.
 
-The same holds between the three implementations in the crate: `layout`, `flat::layout_flat`
-and the AVX2 kernels behind `--features simd` all have to agree bit for bit, which is what
-`tests/flat.rs` and the bench checksums check.
+The same holds between the two implementations in the crate: `layout` and
+`flat::layout_flat` have to agree bit for bit, which is what `tests/flat.rs` and the bench
+checksums check.
 
 ## Getting set up
 
 No dependencies, so there is nothing to install beyond a stable toolchain.
 
 ```sh
-make test        # the suite, scalar kernels and then the vectorized ones
+make test        # the whole suite
 make release     # the optimized build of the library and both binaries
 make bench       # the tables of the README
 make doc         # rustdoc into ./docs

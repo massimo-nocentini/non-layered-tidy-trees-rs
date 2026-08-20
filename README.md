@@ -6,8 +6,7 @@
 
 [`non-layered-tidy-trees.c`](https://github.com/massimo-nocentini/non-layered-tidy-trees.c) translated into plain Rust, with the `test/` suite translated
 along with it, plus a second implementation of the same algorithm over struct-of-arrays
-sweeps. The crate has no dependencies and no `unsafe` at all unless `--features simd` is
-asked for, which adds the AVX2 kernels and nothing else.
+sweeps. The crate has no dependencies and no `unsafe` at all.
 
 ```sh
 cargo test                        # the whole suite, ~8 s (the overlap sweep dominates)
@@ -15,12 +14,12 @@ cargo test --release              # the same, ~5 s
 NLTT_TRIALS=25 cargo test         # a quicker sweep over the same shapes
 cargo doc --open                  # the API, with the C names alongside
 
-cargo run --release --features simd --bin bench    # the numbers below
+cargo run --release --bin bench   # the numbers below
 make -C ../test bench                              # the C rows of the same table
 ```
 
-The `Makefile` wraps the same commands — `make test` runs the suite with the scalar kernels
-and then with the vectorized ones, `make bench` prints the tables below, `make doc` writes
+The `Makefile` wraps the same commands — `make test` runs the suite, `make bench` prints
+the tables below, `make doc` writes
 the API into `docs/`, and `make help` lists the rest. [`CONTRIBUTING.md`](CONTRIBUTING.md)
 says what a patch to a port has to keep true.
 
@@ -118,8 +117,7 @@ assertions.
 | — | `src/lib.rs` unit tests | `max_bottom` / `max_bottom_between`, which the C suite does not cover; the expected values are the ones the C build prints |
 
 `NLTT_TRIALS` sets the trees per shape (default 300, the C default) and `NLTT_DEPTH` the
-depth of the chain (default 10 000). `cargo test --features simd` runs the same suite with
-the vectorized kernels in place of the scalar ones; it has to pass identically.
+depth of the chain (default 10 000).
 
 ## Tracing the phases
 
@@ -138,7 +136,7 @@ NLTT_TRACE=1 cargo run --example trace     # one small tree through every entry 
 [nltt]   second     875.000ns  minbreadth=0
 [nltt]   third       83.000ns  already at the origin
 [nltt]   total        4.333µs
-[nltt] layout_flat  root=#1 arena=4 vertically=true centeredxy=false origin=(0, 0) kernels=scalar
+[nltt] layout_flat  root=#1 arena=4 vertically=true centeredxy=false origin=(0, 0)
 [nltt]   build        4.917µs  nodes=4 depth=3
 [nltt]   setup        1.416µs
 [nltt]   first        2.833µs
@@ -211,7 +209,6 @@ mirror across calls.
 | `rust-rec` (the port) | 69.3 | 83.1 | 84.8 | 135.5 |
 | `rust-flat` | 67.1 | 86.0 | 107.7 | 210.1 |
 | `rust-flat-r` | 56.6 | 81.5 | 101.2 | 171.4 |
-| `rust-simd-r` | 61.9 | 87.0 | 99.9 | 171.4 |
 
 **`layout_api`, arrays in and arrays out:**
 
@@ -221,13 +218,13 @@ mirror across calls.
 | `rust-api` (the port) | 235.9 | 264.6 | 497.2 | 657.1 |
 | `rust-api-flat` | 130.5 | 143.6 | 166.2 | 356.7 |
 | `rust-api-flat-r` | 120.0 | 137.0 | 152.5 | **256.9** |
-| `rust-api-simd-r` | 127.2 | 142.5 | 157.1 | 261.4 |
 
 ### What the numbers say
 
-**SIMD is worth nothing here, as `simd-plan.md` predicted.** `rust-simd-r` and
-`rust-flat-r` are the same speed to within noise, in both tables, at every size. The phase
-breakdown says why (`bench --phases`, 1 M nodes, µs):
+**Explicit SIMD was worth nothing here, and is gone.** The crate used to carry hand-written
+AVX2 kernels behind a `simd` feature — bit-identical to the scalar loops, and the same speed
+to within noise in both tables, at every size. The phase breakdown says why
+(`bench --phases`, 1 M nodes, µs):
 
 | | build | setup | first | second | third | write |
 |---|---:|---:|---:|---:|---:|---:|
@@ -238,13 +235,14 @@ The three vectorizable sweeps are `setup`, `second` and `third`: 16.3 ms of 168.
 10% of the runtime — and they are streaming over arrays at roughly 13 GB/s, which is memory
 bandwidth, not arithmetic. Four lanes of a bandwidth-bound loop are still one memory system.
 `first` — the contour walk, the algorithm proper — is a third of the time on its own and
-cannot be vectorized at any width.
+cannot be vectorized at any width. Those loops are now left plain, for the compiler to widen
+as it sees fit, and the crate has no `unsafe` left anywhere.
 
 **The restructuring is what pays, and only when the input is already flat.** Over an
 `Arena` the mirror is a loss: `build` plus `write` is 56% of a flat layout, which is more
 than the pointer chasing it removes, because a Rust `Arena` is already one contiguous
-`Vec<Node>` — the locality that `simd-plan.md`'s step 2 was chasing in the C is something
-the port had from the start. Over `layout_api` there is no tree to mirror in the first
+`Vec<Node>` — the locality a struct-of-arrays rewrite chases in the C is something the port
+had from the start. Over `layout_api` there is no tree to mirror in the first
 place, the 2n nodes and their child lists never get allocated, and the same code is **2.1×
 faster than the C** and 2.6× faster than the pointer-based Rust.
 
@@ -265,11 +263,9 @@ make -C ../test overlap
 cargo run --release --bin dump -- --check golden.txt 300
 # PASS  9946368 coordinates over 115200 trees, recursive identical to golden.txt
 
-cargo run --release --features simd --bin dump -- --flat --check golden.txt 300
-cargo run --release --features simd --bin dump -- --simd --check golden.txt 300
+cargo run --release --bin dump -- --flat --check golden.txt 300
 ```
 
-All three paths pass: the sweeps and the AVX2 kernels reproduce the C build's coordinates
-exactly, not approximately.
+Both paths pass: the sweeps reproduce the C build's coordinates exactly, not approximately.
 
 Use a smaller trial count (`--dump 10`, `--check golden.txt 10`) for a couple of MB.

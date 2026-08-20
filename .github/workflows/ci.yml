@@ -16,9 +16,8 @@ env:
 
 jobs:
   # The crate has no dependencies, so there is nothing to cache and nothing to audit:
-  # a cold build is a few seconds. `ubuntu-latest` is x86_64 and so exercises the AVX2
-  # kernels for real; `macos-latest` is aarch64 and takes the scalar fallback, which is
-  # the other half of what `--features simd` has to keep working.
+  # a cold build is a few seconds. Both architectures run the same suite: the coordinates
+  # are bit-identical everywhere, which is the claim worth checking twice.
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -42,11 +41,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features
 
-      - name: Test, scalar kernels and then the vectorized ones
+      - name: Test
         run: make test
 
       - name: Smoke the benchmark harness
-        run: cargo run --release --features simd --bin bench -- 1
+        run: cargo run --release --bin bench -- 1
 
   docs:
     name: docs
