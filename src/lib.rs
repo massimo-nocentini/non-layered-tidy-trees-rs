@@ -21,6 +21,9 @@
 //! * `free_tree` has no counterpart: dropping the [`Arena`] frees everything, without
 //!   recursion.
 //!
+//! Setting `NLTT_TRACE=1` makes each entry point print its phases on standard error; see
+//! [`trace`].
+//!
 //! ```
 //! use non_layered_tidy_trees::{layout, Arena, LayoutInput};
 //!
@@ -38,6 +41,9 @@
 //! ```
 
 use std::ops::{Index, IndexMut};
+
+#[macro_use]
+pub mod trace;
 
 pub mod flat;
 pub mod treegen;
@@ -670,12 +676,44 @@ pub fn layout(arena: &mut Arena, input: &LayoutInput) {
 }
 
 /// [`layout`], with the two observation hooks of `treeinput_t`.
+///
+/// The four walks report themselves on standard error when `NLTT_TRACE` asks for it; see
+/// [`trace`].
 pub fn layout_with(arena: &mut Arena, input: &LayoutInput, cb: &mut Callbacks) {
     let root = input.root;
 
+    let on = trace::enabled();
+    let mut sum = std::time::Duration::ZERO;
+
+    trace!(
+        "layout       root=#{} arena={} vertically={} centeredxy={} origin=({}, {}) hooks={}",
+        arena[root].idx,
+        arena.len(),
+        input.vertically,
+        input.centeredxy,
+        input.x,
+        input.y,
+        hooks(cb)
+    );
+
+    let t = trace::start();
     setup_walk(arena, input, root, 0);
+    if let Some(t) = t {
+        // the stopwatch is read before `extent` walks the tree, so the trace's own
+        // bookkeeping does not land in the phase it reports.
+        let d = t.elapsed();
+        let (nodes, depth) = extent(arena, root);
+        trace::line("setup", d, format_args!("nodes={nodes} depth={depth}"));
+        sum += d;
+    }
+
+    let t = trace::start();
     first_walk(arena, input, cb, root);
+    sum += phase!(t, "first");
+
+    let t = trace::start();
     let minbreadth = second_walk(arena, input, cb, root, 0.0);
+    sum += phase!(t, "second", "minbreadth={minbreadth}");
 
     // `third_walk` subtracts, so subtracting the minimum breadth coordinate is the
     // counterpart of the reference's `thirdWalk(t, -minX)`: it normalizes the drawing
@@ -683,8 +721,40 @@ pub fn layout_with(arena: &mut Arena, input: &LayoutInput, cb: &mut Callbacks) {
     let dx = (if input.vertically { minbreadth } else { 0.0 }) - input.x;
     let dy = (if input.vertically { 0.0 } else { minbreadth }) - input.y;
 
+    let t = trace::start();
     if dx != 0.0 || dy != 0.0 {
         third_walk(arena, root, dx, dy);
+        sum += phase!(t, "third", "dx={dx} dy={dy}");
+    } else {
+        sum += phase!(t, "third", "already at the origin");
+    }
+
+    total!(on, sum);
+}
+
+/// How many nodes the subtree of `t` holds, and how many levels; for the trace alone.
+///
+/// It walks the tree, which is why the one caller only reaches it when tracing is on.
+fn extent(a: &Arena, t: NodeId) -> (usize, usize) {
+    let nodes = a.preorder(t);
+    let base = a[t].level;
+    let depth = nodes
+        .iter()
+        .map(|&id| a[id].level - base)
+        .max()
+        .unwrap_or(0)
+        + 1;
+
+    (nodes.len(), depth)
+}
+
+/// Which of the two hooks are set, for the trace.
+fn hooks(cb: &Callbacks) -> &'static str {
+    match (cb.walk.is_some(), cb.contour_pairs.is_some()) {
+        (true, true) => "walk+contour_pairs",
+        (true, false) => "walk",
+        (false, true) => "contour_pairs",
+        (false, false) => "none",
     }
 }
 
@@ -863,7 +933,11 @@ pub fn layout_api(
         "`rooti` is a one-based index into {n} nodes"
     );
 
+    trace!("layout_api   n={n} rooti={rooti} vertically={vertically} centeredxy={centeredxy} origin=({x}, {y})");
+
+    let t = trace::start();
     let (mut arena, nodes) = reify_flat_chunks(n, wh, whg, children);
+    phase!(t, "reify", "arena={} nodes={}", arena.len(), nodes.len());
 
     let root = nodes[rooti - 1 + n];
 
@@ -877,7 +951,9 @@ pub fn layout_api(
 
     layout(&mut arena, &input);
 
+    let t = trace::start();
     flat_xy_into(&arena, &nodes[..n], wh);
+    phase!(t, "write", "{n} coordinate pairs");
 }
 
 #[cfg(test)]

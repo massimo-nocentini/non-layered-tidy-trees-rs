@@ -3,6 +3,7 @@
 #   make test      the suite, scalar kernels and then the vectorized ones
 #   make release   the optimized build of the library and both binaries
 #   make bench     the tables of the README's "Benchmarks" section
+#   make trace     one tree through every entry point, with NLTT_TRACE on
 #   make doc       the API into ./docs, ready to serve as a GitHub Pages folder
 #
 # `make help` lists every target.
@@ -14,7 +15,7 @@ DOCS     = docs
 REPS    ?= 7
 FEATURES = --features simd
 
-.PHONY: all help doc release build test test-simd bench bench-phases clean distclean
+.PHONY: all help doc release build test test-simd bench bench-phases trace clean distclean
 
 all: release
 
@@ -63,6 +64,12 @@ bench:
 ## bench-phases -- where the time goes inside one flat layout (the third README table)
 bench-phases:
 	$(CARGO) run --release $(FEATURES) --bin bench -- $(REPS) --phases
+
+## trace -- what NLTT_TRACE prints, over one small tree
+#
+# Any run of any binary takes the same variable; this is just the smallest example.
+trace:
+	NLTT_TRACE=1 $(CARGO) run --example trace
 
 clean:
 	$(CARGO) clean

@@ -121,6 +121,43 @@ assertions.
 depth of the chain (default 10 000). `cargo test --features simd` runs the same suite with
 the vectorized kernels in place of the scalar ones; it has to pass identically.
 
+## Tracing the phases
+
+`NLTT_TRACE=1` makes every entry point narrate itself on standard error: one header line
+for the call, then one line per phase with what it took and the little that is worth
+knowing about it. Anything else — `0`, `no`, `off`, `false`, unset — is silence.
+
+```sh
+NLTT_TRACE=1 cargo run --example trace     # one small tree through every entry point
+```
+
+```text
+[nltt] layout       root=#1 arena=4 vertically=true centeredxy=false origin=(0, 0) hooks=none
+[nltt]   setup      875.000ns  nodes=4 depth=3
+[nltt]   first        2.500µs
+[nltt]   second     875.000ns  minbreadth=0
+[nltt]   third       83.000ns  already at the origin
+[nltt]   total        4.333µs
+[nltt] layout_flat  root=#1 arena=4 vertically=true centeredxy=false origin=(0, 0) kernels=scalar
+[nltt]   build        4.917µs  nodes=4 depth=3
+[nltt]   setup        1.416µs
+[nltt]   first        2.833µs
+[nltt]   second       2.792µs  minbreadth=0
+[nltt]   third       42.000ns  already at the origin
+[nltt]   write      833.000ns  4 nodes
+[nltt]   total       12.833µs
+```
+
+The names are the ones the sources use: `setup`, `first`, `second` and `third` are the
+walks — the sweeps, in `flat` — and `build`/`write` are the mirror being filled and read
+back. `total` is the sum of the phases rather than the wall clock, so the trace's own
+writes to standard error, which for a small tree outlast the layout, stay out of it.
+
+The variable is read once per process and cached, so a traced build costs one load per
+phase and nothing per node: the contour walk is not instrumented, and `NLTT_TRACE`
+unset changes no timing that `make bench` can see. `Engine::profile` reports the same
+phases as a value instead of a line, which is what `make bench-phases` tabulates.
+
 ## Benchmarks
 
 One tree of `n` nodes, laid out repeatedly; the tree is built outside the timed region and

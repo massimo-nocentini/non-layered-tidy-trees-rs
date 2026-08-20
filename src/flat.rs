@@ -124,13 +124,35 @@ impl Engine {
             "`rooti` is a one-based index into {n} nodes"
         );
 
+        let on = crate::trace::enabled();
+        let mut sum = std::time::Duration::ZERO;
+
+        trace!(
+            "layout_api_flat  n={n} rooti={rooti} vertically={vertically} centeredxy={centeredxy} origin=({x}, {y}) kernels={}",
+            kernel_name(self.kernels)
+        );
+
+        let t = crate::trace::start();
         self.flat
             .rebuild_from_arrays(n, wh, whg, children, rooti, vertically);
+        sum += phase!(
+            t,
+            "build",
+            "{} content={}",
+            mirror(&self.flat),
+            self.flat.content
+        );
 
-        let minbreadth = sweeps(&mut self.flat, vertically, centeredxy, x, y, self.kernels);
+        let (minbreadth, swept) =
+            sweeps(&mut self.flat, vertically, centeredxy, x, y, self.kernels);
         let _ = minbreadth;
+        sum += swept;
 
+        let t = crate::trace::start();
         self.flat.write_back_arrays(n, wh, vertically);
+        sum += phase!(t, "write", "{n} coordinate pairs");
+
+        total!(on, sum);
     }
 
     /// [`Engine::layout`], reporting how long each sweep took.
@@ -182,25 +204,80 @@ impl Phases {
 }
 
 fn run(flat: &mut Flat, arena: &mut Arena, input: &LayoutInput, k: Kernels) {
-    flat.rebuild(arena, input.root, input.vertically);
+    let on = crate::trace::enabled();
+    let mut sum = std::time::Duration::ZERO;
 
-    sweeps(
+    trace!(
+        "layout_flat  root=#{} arena={} vertically={} centeredxy={} origin=({}, {}) kernels={}",
+        arena[input.root].idx,
+        arena.len(),
+        input.vertically,
+        input.centeredxy,
+        input.x,
+        input.y,
+        kernel_name(k)
+    );
+
+    let t = crate::trace::start();
+    flat.rebuild(arena, input.root, input.vertically);
+    sum += phase!(t, "build", "{}", mirror(flat));
+
+    sum += sweeps(
         flat,
         input.vertically,
         input.centeredxy,
         input.x,
         input.y,
         k,
-    );
+    )
+    .1;
 
+    let t = crate::trace::start();
     flat.write_back(arena, input.vertically, input.centeredxy);
+    sum += phase!(t, "write", "{} nodes", flat.n);
+
+    total!(on, sum);
+}
+
+/// Which kernels a trace line is about.
+fn kernel_name(k: Kernels) -> &'static str {
+    if k.is_simd() {
+        "avx2"
+    } else {
+        "scalar"
+    }
+}
+
+/// The shape of the mirror, for the trace.
+fn mirror(flat: &Flat) -> String {
+    format!("nodes={} depth={}", flat.n, flat.levels.len() - 1)
 }
 
 /// The three sweeps and the normalization, over a mirror that is already filled.
-fn sweeps(flat: &mut Flat, vertically: bool, centeredxy: bool, x: f64, y: f64, k: Kernels) -> f64 {
+///
+/// Returns the minimum breadth coordinate, and what the traced phases added up to — zero
+/// when tracing is off; see [`crate::trace`].
+fn sweeps(
+    flat: &mut Flat,
+    vertically: bool,
+    centeredxy: bool,
+    x: f64,
+    y: f64,
+    k: Kernels,
+) -> (f64, std::time::Duration) {
+    let mut sum = std::time::Duration::ZERO;
+
+    let t = crate::trace::start();
     flat.setup_sweep(k);
+    sum += phase!(t, "setup");
+
+    let t = crate::trace::start();
     flat.first_sweep();
+    sum += phase!(t, "first");
+
+    let t = crate::trace::start();
     let minbreadth = flat.second_sweep(centeredxy, k);
+    sum += phase!(t, "second", "minbreadth={minbreadth}");
 
     // The counterpart of `third_walk`: the depth axis is offset by the input alone, the
     // breadth axis is normalized to the origin first.
@@ -209,11 +286,15 @@ fn sweeps(flat: &mut Flat, vertically: bool, centeredxy: bool, x: f64, y: f64, k
     let dbreadth = minbreadth - in_breadth;
     let ddepth = -in_depth;
 
+    let t = crate::trace::start();
     if dbreadth != 0.0 || ddepth != 0.0 {
         flat.third_sweep(dbreadth, ddepth, k);
+        sum += phase!(t, "third", "dbreadth={dbreadth} ddepth={ddepth}");
+    } else {
+        sum += phase!(t, "third", "already at the origin");
     }
 
-    minbreadth
+    (minbreadth, sum)
 }
 
 /// [`crate::layout_api`], without ever building a tree of nodes.
@@ -288,6 +369,27 @@ fn run_profiled(
     let t = Instant::now();
     flat.write_back(arena, input.vertically, input.centeredxy);
     phases.write_back = t.elapsed();
+
+    // the phases are timed here already, so the trace reports those rather than timing
+    // them a second time.
+    if crate::trace::enabled() {
+        crate::trace::header(format_args!(
+            "profile      root=#{} arena={} vertically={} centeredxy={} origin=({}, {}) kernels={}",
+            arena[input.root].idx,
+            arena.len(),
+            input.vertically,
+            input.centeredxy,
+            input.x,
+            input.y,
+            kernel_name(k)
+        ));
+
+        for (name, d) in phases.iter() {
+            crate::trace::line(name, d, format_args!(""));
+        }
+
+        crate::trace::line("total", phases.total(), format_args!("{}", mirror(flat)));
+    }
 }
 
 /// The tree, transposed: one array per field, in breadth-first order.
