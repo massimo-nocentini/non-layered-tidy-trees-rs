@@ -114,6 +114,7 @@ assertions.
 | `test/depth.c` | `tests/depth.rs` | a chain of 10 000 levels; the walks run on a thread with a 64 MiB stack, since `cargo test` gives each test 2 MiB |
 | — | `tests/flat.rs` | the sweeps against the recursion, bit for bit: 1 152 trees with their bookkeeping, a reused `Engine`, a 300 000-level chain, and `layout_api_flat` against `layout_api` |
 | `overlap --dump` | `src/bin/dump.rs` | the differential oracle below |
+| — | `tests/space.rs`, `tests/space_overlap.rs` | the 3D layout of [`space`](#three-dimensions) |
 | — | `src/lib.rs` unit tests | `max_bottom` / `max_bottom_between`, which the C suite does not cover; the expected values are the ones the C build prints |
 
 `NLTT_TRIALS` sets the trees per shape (default 300, the C default) and `NLTT_DEPTH` the
@@ -182,6 +183,61 @@ bounded by the memory it fits in rather than by 2^31 nodes, where before it woul
 truncated silently. That costs the contour walk a quarter of its time — it is memory bound,
 and eight-byte links halve what a cache line holds — which the halved mirror pays back on
 the API path and does not on the `Arena` path, where there are no gap nodes to fold.
+
+## Three dimensions
+
+`space` lays a tree out in three dimensions: every node is a box `w` × `h` × `d`, the depth
+axis is `y` and non-layered exactly as above, and the children of a node are spread over
+the `x`–`z` plane.
+
+```rust
+use non_layered_tidy_trees::space::{layout3, Arena3, AxisRule, LayoutInput3};
+
+let mut arena = Arena3::new();
+let root = arena.add_node(1, 10.0, 10.0, 10.0, 0.0); // idx, w, h, d, margin
+let a = arena.add_node(2, 10.0, 10.0, 10.0, 0.0);
+let b = arena.add_node(3, 10.0, 10.0, 10.0, 0.0);
+arena.set_children(root, &[a, b]);
+
+layout3(&mut arena, &LayoutInput3 { rule: AxisRule::Alternate, ..LayoutInput3::new(root) });
+```
+
+The 2D algorithm is linear because merging a subtree into its left siblings is one splice
+of two threaded contours, and a splice needs the siblings in a line. So every internal node
+picks a *family axis*, `x` or `z` — by `AxisRule` (`AllX`, `AllZ`, or `Alternate` by
+subtree height) or by its own `axis` — and
+
+* separates its children along that axis with the very same `separate`, sibling chain,
+  `move_subtree` and `position_root`, over the contours along that axis;
+* centres each child under its own box along the other axis.
+
+Each subtree keeps four threaded contours, left and right along `x` and `z`. Along the
+family axis they are the 2D splice. Along the other axis the children are stacked in depth
+rather than side by side, so the contour is the node, then one *hull* item covering the
+depths down to the second deepest child with the extreme of all of them there, then a
+thread into the deepest child's own contour. Either way a merge is a prefix plus one
+thread, and the layout stays linear.
+
+What it keeps, and what pins it down in `tests/space.rs` and `tests/space_overlap.rs`:
+
+| | |
+|---|---|
+| no two boxes overlap, and margins hold along the separating axis | every pair, over the corpus of `tests/overlap.rs` with a `d` per box, under every rule and a random axis per node, plus boxes of zero extent |
+| `AllX` is the 2D drawing: `x` and `y` bit for bit those of `layout`, whatever `d` is | the same corpus, both centring modes; `AllZ` likewise against `layout` with `d` for `w` |
+| parent centred over its first and last child, children in order, along the family axis; each child centred under its parent along the other | random trees, every rule |
+| reversing every family mirrors the drawing along `x` and `z`, without margins | random trees, every rule |
+| isomorphic subtrees drawn alike | two copies of a subtree around a third |
+| normalization, repeatability, `centered` as one rigid translation | as in `tests/properties.rs` |
+| linear | 1.3–1.9 contour pairs per node from 2 000 to 32 000 nodes, on random, binary and spine shapes |
+
+The price is compactness: siblings are separated along their family's axis even where they
+are already apart along the other one, and a hull keeps a subtree's full extent at every
+depth it covers.
+
+On the Xeon of the benchmarks below, release build, ns/node over `bench_tree` lifted with a
+random `d`: `layout` 96 / 85 / 111, `layout3` with `AllX` 151 / 203 / 268 at 10 000 / 100 000 /
+1 000 000 nodes, `Alternate` within 3% of `AllX`. `Node3` carries both axes and its hulls,
+so the walks have more memory to go through. There is no flat port of it yet.
 
 ## Benchmarks
 

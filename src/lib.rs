@@ -24,6 +24,9 @@
 //! Setting `NLTT_TRACE=1` makes each entry point print its phases on standard error; see
 //! [`trace`].
 //!
+//! [`space`] lays the same kind of tree out in three dimensions, with boxes that also have a
+//! `d` and children spread over the `x`–`z` plane, in linear time as well.
+//!
 //! ```
 //! use non_layered_tidy_trees::{layout, Arena, LayoutInput};
 //!
@@ -46,6 +49,7 @@ use std::ops::{Index, IndexMut};
 pub mod trace;
 
 pub mod flat;
+pub mod space;
 pub mod treegen;
 
 /// A handle on a node held by an [`Arena`].
@@ -326,12 +330,12 @@ pub struct Callbacks<'a> {
 /// The C keeps a hand-freed linked list; here the chain is a stack, so `nxt` is the
 /// element below and the head is the last one.
 #[derive(Debug, Clone, Copy)]
-struct ChainLink {
-    low: f64,
-    index: usize,
+pub(crate) struct ChainLink {
+    pub(crate) low: f64,
+    pub(crate) index: usize,
 }
 
-fn update_chain(chain: &mut Vec<ChainLink>, min: f64, i: usize) {
+pub(crate) fn update_chain(chain: &mut Vec<ChainLink>, min: f64, i: usize) {
     while let Some(top) = chain.last() {
         if min >= top.low {
             chain.pop();
