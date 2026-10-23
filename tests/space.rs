@@ -11,7 +11,7 @@
 //! * **depth** — a chain of 10 000 levels, on a thread with a large stack
 
 use non_layered_tidy_trees::space::{
-    layout3, layout3_with, Arena3, AxisRule, Breadth, Callbacks3, Item, LayoutInput3,
+    layout3, layout3_with, Arena3, Axis, AxisRule, Callbacks3, Item, LayoutInput3,
 };
 use non_layered_tidy_trees::treegen::{self, Regime, Rng, REGIMES};
 use non_layered_tidy_trees::{layout, Arena, LayoutInput, NodeId};
@@ -39,8 +39,17 @@ fn lo(a: &Arena3, t: NodeId) -> [f64; 3] {
     }
 }
 
-fn breadth(a: &Arena3, t: NodeId, ax: Breadth) -> f64 {
-    lo(a, t)[if ax == Breadth::X { 0 } else { 2 }]
+fn breadth(a: &Arena3, t: NodeId, ax: Axis) -> f64 {
+    lo(a, t)[ax.index()]
+}
+
+/// The other breadth axis, the depth being along `y`.
+fn cross(ax: Axis) -> Axis {
+    if ax == Axis::X {
+        Axis::Z
+    } else {
+        Axis::X
+    }
 }
 
 #[test]
@@ -124,6 +133,7 @@ fn normalization() {
                         let (mut a, root) = tree(4242 + k, 4, 3, regime);
                         let input = LayoutInput3 {
                             root,
+                            depth: Axis::Y,
                             centered: cent,
                             rule,
                             x,
@@ -251,7 +261,7 @@ fn tidiness() {
                 if cs.is_empty() {
                     continue;
                 }
-                let (fa, cr) = (a[v].family(), a[v].family().other());
+                let (fa, cr) = (a[v].family(), cross(a[v].family()));
                 let (f, l) = (cs[0], cs[cs.len() - 1]);
 
                 let mid = breadth(&a, v, fa) + a[v].extent(fa) / 2.0;
@@ -434,7 +444,7 @@ fn congruence() {
 /// Contour pairs compared over a layout, per node.
 fn pairs_per_node(a: &mut Arena3, root: NodeId, rule: AxisRule) -> f64 {
     let mut pairs = 0usize;
-    let mut count = |_: &Arena3, _: Item, _: Item, _: Breadth, _: f64| pairs += 1;
+    let mut count = |_: &Arena3, _: Item, _: Item, _: Axis, _: f64| pairs += 1;
     let mut cb = Callbacks3 {
         walk: None,
         contour_pairs: Some(&mut count),

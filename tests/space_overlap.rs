@@ -10,7 +10,7 @@
 //! NLTT_TRIALS=10 cargo test --test space_overlap     # a quicker sweep
 //! ```
 
-use non_layered_tidy_trees::space::{layout3, Arena3, AxisRule, Breadth, LayoutInput3};
+use non_layered_tidy_trees::space::{layout3, Arena3, Axis, AxisRule, LayoutInput3};
 use non_layered_tidy_trees::treegen::{self, Regime, Rng, REGIMES};
 use non_layered_tidy_trees::NodeId;
 
@@ -49,11 +49,7 @@ fn tree(
 
     if rule == 3 {
         for v in a3.preorder(root3) {
-            a3[v].axis = Some(if rng.rand(2) == 0 {
-                Breadth::X
-            } else {
-                Breadth::Z
-            });
+            a3[v].axis = Some(if rng.rand(2) == 0 { Axis::X } else { Axis::Z });
         }
     }
 
@@ -123,7 +119,7 @@ fn violations(a: &Arena3, root: NodeId) -> (usize, usize, String) {
                 continue;
             }
             let u = *anc[i].iter().find(|v| anc[j].contains(v)).unwrap();
-            let k = if a[u].family() == Breadth::X { 0 } else { 2 };
+            let k = if a[u].family() == Axis::X { 0 } else { 2 };
             if phi[k] + a[p].margin > qlo[k] + E {
                 margins += 1;
             }

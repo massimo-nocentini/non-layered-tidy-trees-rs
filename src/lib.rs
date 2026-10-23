@@ -25,7 +25,7 @@
 //! [`trace`].
 //!
 //! [`space`] lays the same kind of tree out in three dimensions, with boxes that also have a
-//! `d` and children spread over the `x`–`z` plane, in linear time as well.
+//! `d` and the children of a node spread over a plane, in linear time as well.
 //!
 //! ```
 //! use non_layered_tidy_trees::{layout, Arena, LayoutInput};

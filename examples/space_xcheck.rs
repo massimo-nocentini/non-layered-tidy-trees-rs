@@ -4,7 +4,7 @@
 //! `w h d margin parent axis`, the root first with parent `-1` and the axis `0` for `x`, `1`
 //! for `z`. One line comes out per tree, with `x y z` for every node in the same order.
 
-use non_layered_tidy_trees::space::{layout3, Arena3, Breadth, LayoutInput3};
+use non_layered_tidy_trees::space::{layout3, Arena3, Axis, LayoutInput3};
 
 fn main() {
     let path = std::env::args()
@@ -35,7 +35,7 @@ fn main() {
             .collect();
 
         for (i, r) in rows.iter().enumerate() {
-            arena[ids[i]].axis = Some(if r[5] == 0.0 { Breadth::X } else { Breadth::Z });
+            arena[ids[i]].axis = Some(if r[5] == 0.0 { Axis::X } else { Axis::Z });
             if r[4] >= 0.0 {
                 arena.push_child(ids[r[4] as usize], ids[i]);
             }

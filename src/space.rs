@@ -1,19 +1,20 @@
 //! Non-layered tidy trees in three dimensions.
 //!
-//! Every node is a box `w` × `h` × `d`: `w` along `x`, `h` along the depth axis `y` (top
-//! down, exactly as in [`crate::layout`]), and `d` along `z`. The depth axis stays
-//! non-layered — a child starts at its parent's bottom — and the two breadth axes `x` and
-//! `z` form the plane the children of a node are spread over.
+//! Every node is a box `w` × `h` × `d`, its extents along `x`, `y` and `z`. One axis is the
+//! depth axis — `y` by default, top down, exactly as in [`crate::layout`] — and stays
+//! non-layered: a child starts at its parent's bottom. The other two are the *breadth*
+//! axes, the plane the children of a node are spread over.
 //!
 //! The 2D algorithm is linear because merging a subtree into its left siblings is one
 //! splice of two threaded contours. That needs the siblings to be ordered along a line,
-//! so here every internal node `v` picks a *family axis* `a(v)`, `x` or `z`, and
+//! so here every internal node `v` picks a *family axis* `a(v)`, one of the two breadth
+//! axes, and
 //!
 //! * lays its children out along `a(v)` with the very same `separate`, sibling chain,
 //!   `move_subtree` and `position_root` as [`crate::layout`], on the contours along `a(v)`;
-//! * centres each child's box under its own box along the other axis `b(v)`.
+//! * centres each child's box under its own box along the other breadth axis `b(v)`.
 //!
-//! Each subtree keeps four threaded contours, left and right along both `x` and `z`.
+//! Each subtree keeps four threaded contours, left and right along both breadth axes.
 //! Along `a(v)` they are the 2D splice. Along `b(v)` the children sit side by side in
 //! depth rather than in breadth, so the contour of `v` is `v` itself, then one [`Item::Hull`]
 //! covering the depths down to the second deepest child with the extreme of everything
@@ -31,7 +32,11 @@
 //! subtree's full extent at every depth it covers.
 //!
 //! With every family along `x` ([`AxisRule::AllX`]), `x` and `y` come out bit for bit as
-//! [`crate::layout`] draws the same tree, whatever the `d` of each box.
+//! [`crate::layout`] draws the same tree, whatever the `d` of each box; with the depth
+//! along `x` and every family along `y`, as it draws the tree with `vertically` off.
+//!
+//! [`flat`] computes the same coordinates with sweeps over a struct-of-arrays mirror,
+//! which recurse nowhere.
 //!
 //! ```
 //! use non_layered_tidy_trees::space::{layout3, Arena3, AxisRule, LayoutInput3};
@@ -57,71 +62,105 @@ use std::ops::{Index, IndexMut};
 
 use crate::{update_chain, Arena, ChainLink, Node, NodeId};
 
-/// One of the two breadth axes.
+pub mod flat;
+
+/// One of the three axes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum Breadth {
-    /// Along `x`, where a box measures `w`.
-    #[default]
+pub enum Axis {
+    /// Where a box measures `w`.
     X,
-    /// Along `z`, where a box measures `d`.
+    /// Where a box measures `h`; the default depth axis.
+    #[default]
+    Y,
+    /// Where a box measures `d`.
     Z,
 }
 
-impl Breadth {
-    /// The other breadth axis.
-    pub fn other(self) -> Breadth {
+impl Axis {
+    /// The position of the axis in `x`, `y`, `z` order.
+    pub fn index(self) -> usize {
         match self {
-            Breadth::X => Breadth::Z,
-            Breadth::Z => Breadth::X,
+            Axis::X => 0,
+            Axis::Y => 1,
+            Axis::Z => 2,
         }
     }
 
-    fn ix(self) -> usize {
-        match self {
-            Breadth::X => 0,
-            Breadth::Z => 1,
+    fn of(i: usize) -> Axis {
+        [Axis::X, Axis::Y, Axis::Z][i]
+    }
+}
+
+/// Which world axis plays which part: the depth axis, and the two breadth axes in `x`, `y`,
+/// `z` order. The walks only ever see breadth axis 0 and 1 and the depth axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Frame {
+    pub(crate) breadth: [usize; 2],
+    pub(crate) depth: usize,
+}
+
+impl Frame {
+    pub(crate) fn new(depth: Axis) -> Frame {
+        let d = depth.index();
+        let mut breadth = [0; 2];
+        let mut k = 0;
+        for i in 0..3 {
+            if i != d {
+                breadth[k] = i;
+                k += 1;
+            }
         }
+        Frame { breadth, depth: d }
     }
 
-    fn of(ax: usize) -> Breadth {
-        if ax == 0 {
-            Breadth::X
-        } else {
-            Breadth::Z
-        }
+    /// Which breadth axis `ax` is, or `None` for the depth axis.
+    fn slot(self, ax: Axis) -> Option<usize> {
+        self.breadth.iter().position(|&b| b == ax.index())
+    }
+
+    /// The breadth axis a family is laid out along, for a node of children.
+    ///
+    /// # Panics
+    ///
+    /// If the axis asked for, by the node or by the rule, is the depth axis.
+    pub(crate) fn family(self, axis: Option<Axis>, rule: AxisRule, height: usize) -> usize {
+        let ax = axis.unwrap_or_else(|| rule.pick(height, self));
+        self.slot(ax).unwrap_or_else(|| {
+            panic!("a family cannot be laid out along {ax:?}, which is the depth axis")
+        })
     }
 }
 
 /// Which axis each family is laid out along, for the nodes that do not say.
 ///
-/// [`Node3::axis`] overrides the rule node by node.
+/// [`Node3::axis`] overrides the rule node by node. Either has to name a breadth axis: a
+/// family along the depth axis is a panic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AxisRule {
-    /// Every family along `x`: the 2D drawing, with every child centred along `z`.
+    /// Every family along `x`.
     #[default]
     AllX,
+    /// Every family along `y`, for a depth axis other than `y`.
+    AllY,
     /// Every family along `z`.
     AllZ,
-    /// By the height of the subtree: odd heights along `x`, even heights along `z`.
+    /// By the height of the subtree: odd heights along the first breadth axis — `x`, or `y`
+    /// when the depth is along `x` — even heights along the second.
     ///
-    /// The parents of leaves only — height 1 — spread along `x`, their parents along `z`,
-    /// and so on upwards. The height depends on the subtree alone, so isomorphic subtrees
-    /// get the same axes and come out congruent; a rule by level would not.
+    /// The parents of leaves only, height 1, spread along the first, their parents along
+    /// the second, and so on upwards. The height depends on the subtree alone, so
+    /// isomorphic subtrees get the same axes and come out congruent; a rule by level would
+    /// not.
     Alternate,
 }
 
 impl AxisRule {
-    fn pick(self, height: usize) -> Breadth {
+    fn pick(self, height: usize, frame: Frame) -> Axis {
         match self {
-            AxisRule::AllX => Breadth::X,
-            AxisRule::AllZ => Breadth::Z,
-            AxisRule::Alternate => {
-                if height % 2 == 1 {
-                    Breadth::X
-                } else {
-                    Breadth::Z
-                }
-            }
+            AxisRule::AllX => Axis::X,
+            AxisRule::AllY => Axis::Y,
+            AxisRule::AllZ => Axis::Z,
+            AxisRule::Alternate => Axis::of(frame.breadth[if height % 2 == 1 { 0 } else { 1 }]),
         }
     }
 }
@@ -182,7 +221,7 @@ pub struct Node3 {
     pub centered: bool,
     /// Extent along `x`.
     pub w: f64,
-    /// Extent along the depth axis `y`.
+    /// Extent along `y`.
     pub h: f64,
     /// Extent along `z`.
     pub d: f64,
@@ -192,21 +231,27 @@ pub struct Node3 {
     pub margin: f64,
     /// The axis this node's children are laid out along; `None` leaves it to
     /// [`LayoutInput3::rule`].
-    pub axis: Option<Breadth>,
-    /// Breadth coordinate.
+    pub axis: Option<Axis>,
+    /// Coordinate along `x`.
     pub x: f64,
-    /// Depth coordinate.
+    /// Coordinate along `y`.
     pub y: f64,
-    /// Breadth coordinate.
+    /// Coordinate along `z`.
     pub z: f64,
     /// The parent, set by [`layout3`]; `None` for the root.
     pub parent: Option<NodeId>,
 
     children: Vec<NodeId>,
-    /// The resolved family axis.
-    fam: Breadth,
+    /// The resolved family axis, as a breadth axis of the frame and as a world axis.
+    fam: usize,
+    family: Axis,
 
-    // Everything per breadth axis is indexed by `Breadth::ix`.
+    // Everything below is in the frame of the layout: per breadth axis, indexed 0 and 1,
+    // or along the depth axis. The world fields are only written by the second walk.
+    ext: [f64; 2],
+    dext: f64,
+    top: f64,
+
     prelim: [f64; 2],
     modifier: [f64; 2],
     /// Along the family axis of the parent, the only one siblings are spread along.
@@ -221,8 +266,8 @@ pub struct Node3 {
 
     /// The deepest bottom of the subtree.
     maxdepth: f64,
-    /// The subtree's extent as `[xmin, xmax, zmin, zmax]`, relative to this node's own
-    /// corner and with the margins on the far faces.
+    /// The subtree's extent as `[min0, max0, min1, max1]` over the breadth axes, relative
+    /// to this node's own corner and with the margins on the far faces.
     ///
     /// Relative to the corner and not to `prelim`: the thread correction moves a leaf's
     /// `prelim` and `modifier` in opposite directions, and only their sum is stable.
@@ -248,7 +293,11 @@ impl Node3 {
             z: 0.0,
             parent: None,
             children: Vec::new(),
-            fam: Breadth::X,
+            fam: 0,
+            family: Axis::X,
+            ext: [0.0; 2],
+            dext: 0.0,
+            top: 0.0,
             prelim: [0.0; 2],
             modifier: [0.0; 2],
             shift: 0.0,
@@ -271,21 +320,35 @@ impl Node3 {
     }
 
     /// The axis the children were laid out along, as [`layout3`] resolved it.
-    pub fn family(&self) -> Breadth {
-        self.fam
+    pub fn family(&self) -> Axis {
+        self.family
     }
 
-    /// The extent along a breadth axis.
-    pub fn extent(&self, ax: Breadth) -> f64 {
-        self.ext(ax.ix())
+    /// The extent along an axis.
+    pub fn extent(&self, ax: Axis) -> f64 {
+        [self.w, self.h, self.d][ax.index()]
+    }
+
+    /// The coordinate along an axis.
+    pub fn coord(&self, ax: Axis) -> f64 {
+        [self.x, self.y, self.z][ax.index()]
+    }
+
+    fn coord_mut(&mut self, i: usize) -> &mut f64 {
+        match i {
+            0 => &mut self.x,
+            1 => &mut self.y,
+            _ => &mut self.z,
+        }
     }
 
     fn ext(&self, ax: usize) -> f64 {
-        if ax == 0 {
-            self.w
-        } else {
-            self.d
-        }
+        self.ext[ax]
+    }
+
+    /// The bottom along the depth axis, while the walks run.
+    fn bot(&self) -> f64 {
+        self.top + self.dext
     }
 }
 
@@ -370,10 +433,12 @@ impl Arena3 {
         out
     }
 
-    /// The bottom of a node's box along the depth axis.
-    pub fn bottom(&self, t: NodeId) -> f64 {
+    /// The far edge of a node's box along the depth axis, the counterpart of
+    /// [`Arena::bottom`].
+    pub fn bottom(&self, t: NodeId, depth: Axis) -> f64 {
         let n = &self.nodes[t.0];
-        n.y + if n.centered { n.h / 2.0 } else { n.h }
+        let e = n.extent(depth);
+        n.coord(depth) + if n.centered { e / 2.0 } else { e }
     }
 
     /// A copy of the tree rooted at `root` in a 2D arena, with `depth` giving each box its
@@ -416,7 +481,7 @@ impl Arena3 {
 
     fn item_bottom(&self, it: Item) -> f64 {
         match it {
-            Item::Node(n) => self.bottom(n),
+            Item::Node(n) => self[n].bot(),
             Item::Hull(n, s) => self.hull(n, s).bottom,
         }
     }
@@ -486,7 +551,7 @@ impl Arena3 {
                         Side::Left => n.tl[ax],
                         Side::Right => n.tr[ax],
                     },
-                    _ if n.fam.ix() == ax => match side {
+                    _ if n.fam == ax => match side {
                         Side::Left => n.children.first().map(|&c| Item::Node(c)),
                         Side::Right => n.children.last().map(|&c| Item::Node(c)),
                     },
@@ -504,24 +569,28 @@ impl Arena3 {
 pub struct LayoutInput3 {
     /// The root of the tree to lay out.
     pub root: NodeId,
+    /// The depth axis, the counterpart of `vertically`.
+    pub depth: Axis,
     /// Whether `x`/`y`/`z` should denote the middle of each box rather than its corner.
     pub centered: bool,
     /// The family axis of the nodes whose [`Node3::axis`] is `None`.
     pub rule: AxisRule,
-    /// Where the normalized drawing starts along `x`.
+    /// Where the drawing starts along `x`: its smallest `x`, or the root's when `x` is the
+    /// depth axis. Likewise for `y` and `z`.
     pub x: f64,
-    /// Where the root starts along `y`.
+    /// Where the drawing starts along `y`.
     pub y: f64,
-    /// Where the normalized drawing starts along `z`.
+    /// Where the drawing starts along `z`.
     pub z: f64,
 }
 
 impl LayoutInput3 {
-    /// A drawing of `root` with every family along `x`, in corner coordinates, starting at
-    /// the origin.
+    /// A top down drawing of `root` with every family along `x`, in corner coordinates,
+    /// starting at the origin.
     pub fn new(root: NodeId) -> Self {
         LayoutInput3 {
             root,
+            depth: Axis::Y,
             centered: false,
             rule: AxisRule::AllX,
             x: 0.0,
@@ -535,7 +604,7 @@ impl LayoutInput3 {
 pub type WalkFn3<'a> = dyn FnMut(&mut Arena3, NodeId) + 'a;
 
 /// Called for every contour pair `separate` compares, with the axis and the `dist`.
-pub type ContourPairsFn3<'a> = dyn FnMut(&Arena3, Item, Item, Breadth, f64) + 'a;
+pub type ContourPairsFn3<'a> = dyn FnMut(&Arena3, Item, Item, Axis, f64) + 'a;
 
 /// The two hooks of [`layout3_with`], the counterpart of [`crate::Callbacks`].
 #[derive(Default)]
@@ -549,7 +618,7 @@ pub struct Callbacks3<'a> {
 
 /// Process change and shift to add intermediate spacing to mod, along the family axis.
 fn add_child_spacing(a: &mut Arena3, t: NodeId) {
-    let ax = a[t].fam.ix();
+    let ax = a[t].fam;
     let mut d = 0.0;
     let mut modsumdelta = 0.0;
     for i in 0..a.nchildren(t) {
@@ -614,6 +683,7 @@ fn set_right_thread(a: &mut Arena3, t: NodeId, i: usize, sr: Item, modsumsr: f64
 fn separate(
     a: &mut Arena3,
     cb: &mut Callbacks3,
+    frame: Frame,
     t: NodeId,
     i: usize,
     chain: &[ChainLink],
@@ -653,7 +723,7 @@ fn separate(
         first = false;
 
         if let Some(f) = cb.contour_pairs.as_mut() {
-            f(a, s, c, Breadth::of(ax), dist);
+            f(a, s, c, Axis::of(frame.breadth[ax]), dist);
         }
 
         if sy <= cy {
@@ -794,7 +864,7 @@ fn set_extreme(a: &mut Arena3, t: NodeId, side: Side, ax: usize, it: Option<Item
     }
 }
 
-fn first_walk(a: &mut Arena3, cb: &mut Callbacks3, t: NodeId) {
+fn first_walk(a: &mut Arena3, cb: &mut Callbacks3, frame: Frame, t: NodeId) {
     let k = a.nchildren(t);
 
     if k == 0 {
@@ -804,17 +874,17 @@ fn first_walk(a: &mut Arena3, cb: &mut Callbacks3, t: NodeId) {
         n.er = [Some(Item::Node(t)); 2];
         n.msel = [0.0; 2];
         n.mser = [0.0; 2];
-        n.bbox = [0.0, n.w + n.margin, 0.0, n.d + n.margin];
-        n.maxdepth = n.y + n.h;
+        n.bbox = [0.0, n.ext[0] + n.margin, 0.0, n.ext[1] + n.margin];
+        n.maxdepth = n.bot();
         return;
     }
 
-    let ax = a[t].fam.ix();
+    let ax = a[t].fam;
     let b = 1 - ax;
 
     // Along the family axis: the 2D first walk, verbatim.
     let c0 = a.child(t, 0);
-    first_walk(a, cb, c0);
+    first_walk(a, cb, frame, c0);
 
     let mut chain = Vec::new();
     let el = a[c0].el[ax].expect("the first walk sets the extreme left item");
@@ -822,12 +892,12 @@ fn first_walk(a: &mut Arena3, cb: &mut Callbacks3, t: NodeId) {
 
     for i in 1..k {
         let ci = a.child(t, i);
-        first_walk(a, cb, ci);
+        first_walk(a, cb, frame, ci);
 
         let er = a[ci].er[ax].expect("the first walk sets the extreme right item");
         let min = a.item_bottom(er);
 
-        separate(a, cb, t, i, &chain, ax);
+        separate(a, cb, frame, t, i, &chain, ax);
 
         update_chain(&mut chain, min, i);
     }
@@ -881,7 +951,7 @@ fn first_walk(a: &mut Arena3, cb: &mut Callbacks3, t: NodeId) {
     // The subtree's extent, with the spacing the second walk will add to the middle
     // children replayed in the same order `add_child_spacing` applies it.
     let n = &a[t];
-    let mut bbox = [0.0, n.w + n.margin, 0.0, n.d + n.margin];
+    let mut bbox = [0.0, n.ext[0] + n.margin, 0.0, n.ext[1] + n.margin];
     let origin = n.prelim;
     let (mut d, mut modsumdelta) = (0.0, 0.0);
     for i in 0..k {
@@ -904,8 +974,8 @@ fn first_walk(a: &mut Arena3, cb: &mut Callbacks3, t: NodeId) {
         }
     }
 
-    let bottom = a.bottom(t);
     let n = &mut a[t];
+    let bottom = n.bot();
     n.bbox = bbox;
     n.maxdepth = if d1 > bottom { d1 } else { bottom };
 }
@@ -914,6 +984,7 @@ fn second_walk(
     a: &mut Arena3,
     input: &LayoutInput3,
     cb: &mut Callbacks3,
+    frame: Frame,
     t: NodeId,
     modsum_init: [f64; 2],
 ) -> [f64; 2] {
@@ -923,20 +994,21 @@ fn second_walk(
         modsum_init[0] + n.modifier[0],
         modsum_init[1] + n.modifier[1],
     ];
-    let dx = n.prelim[0] + modsum[0];
-    let dz = n.prelim[1] + modsum[1];
+    let d0 = n.prelim[0] + modsum[0];
+    let d1 = n.prelim[1] + modsum[1];
 
-    let (xoffset, yoffset, zoffset) = if input.centered {
-        (n.w / 2.0, n.h / 2.0, n.d / 2.0)
+    let (o0, od, o1) = if input.centered {
+        (n.ext[0] / 2.0, n.dext / 2.0, n.ext[1] / 2.0)
     } else {
         (0.0, 0.0, 0.0)
     };
     n.centered = input.centered;
 
-    n.x = dx + xoffset;
-    n.y += yoffset;
-    n.z = dz + zoffset;
-    let mut best = [n.x, n.z];
+    let best = [d0 + o0, d1 + o1];
+    *n.coord_mut(frame.breadth[0]) = best[0];
+    *n.coord_mut(frame.breadth[1]) = best[1];
+    *n.coord_mut(frame.depth) = n.top + od;
+    let mut best = best;
 
     add_child_spacing(a, t);
 
@@ -946,7 +1018,7 @@ fn second_walk(
 
     for i in 0..a.nchildren(t) {
         let c = a.child(t, i);
-        let current = second_walk(a, input, cb, c, modsum);
+        let current = second_walk(a, input, cb, frame, c, modsum);
         for q in 0..2 {
             if current[q] < best[q] {
                 best[q] = current[q];
@@ -959,11 +1031,21 @@ fn second_walk(
 
 /// Resets what the walks accumulate into, sets the depth coordinates and resolves the
 /// family axes; returns the height of the subtree.
-fn setup_walk(a: &mut Arena3, input: &LayoutInput3, t: NodeId, level: usize) -> usize {
+fn setup_walk(
+    a: &mut Arena3,
+    input: &LayoutInput3,
+    frame: Frame,
+    t: NodeId,
+    level: usize,
+) -> usize {
     let n = &mut a[t];
 
     n.level = level;
     n.centered = false;
+
+    let world = [n.w, n.h, n.d];
+    n.ext = [world[frame.breadth[0]], world[frame.breadth[1]]];
+    n.dext = world[frame.depth];
 
     n.prelim = [0.0; 2];
     n.modifier = [0.0; 2];
@@ -980,10 +1062,10 @@ fn setup_walk(a: &mut Arena3, input: &LayoutInput3, t: NodeId, level: usize) -> 
     n.hulls = [Hull::default(); 2];
 
     if level == 0 {
-        n.y = 0.0;
+        n.top = 0.0;
     }
 
-    let b = a.bottom(t);
+    let b = n.bot();
     let mut height = 0;
 
     for i in 0..a.nchildren(t) {
@@ -992,37 +1074,57 @@ fn setup_walk(a: &mut Arena3, input: &LayoutInput3, t: NodeId, level: usize) -> 
 
         c.childno = i;
         c.parent = Some(t);
-        c.y = b;
+        c.top = b;
 
-        let h = setup_walk(a, input, child, level + 1) + 1;
+        let h = setup_walk(a, input, frame, child, level + 1) + 1;
         if h > height {
             height = h;
         }
     }
 
     let n = &mut a[t];
-    n.fam = n.axis.unwrap_or_else(|| input.rule.pick(height));
+    n.fam = if n.children.is_empty() {
+        0
+    } else {
+        frame.family(n.axis, input.rule, height)
+    };
+    n.family = Axis::of(frame.breadth[n.fam]);
 
     height
 }
 
-fn third_walk(a: &mut Arena3, t: NodeId, dx: f64, dy: f64, dz: f64) {
+fn third_walk(a: &mut Arena3, t: NodeId, delta: [f64; 3]) {
     let n = &mut a[t];
-    n.x -= dx;
-    n.y -= dy;
-    n.z -= dz;
+    n.x -= delta[0];
+    n.y -= delta[1];
+    n.z -= delta[2];
 
     for i in 0..a.nchildren(t) {
         let c = a.child(t, i);
-        third_walk(a, c, dx, dy, dz);
+        third_walk(a, c, delta);
     }
+}
+
+/// What the third walk subtracts along `x`, `y` and `z`: the breadth axes are normalized to
+/// the origin first, the depth axis is only offset.
+pub(crate) fn deltas(frame: Frame, mins: [f64; 2], origin: [f64; 3]) -> [f64; 3] {
+    let mut delta = [0.0; 3];
+    delta[frame.breadth[0]] = mins[0] - origin[frame.breadth[0]];
+    delta[frame.breadth[1]] = mins[1] - origin[frame.breadth[1]];
+    delta[frame.depth] = 0.0 - origin[frame.depth];
+    delta
 }
 
 /// Lays out the tree described by `input`, writing `x`, `y` and `z` into every node.
 ///
-/// The drawing is normalized so that the smallest `x` and `z` end up at `input.x` and
-/// `input.z`, and the root at `input.y`. Applying it twice to the same tree gives the
-/// same coordinates.
+/// The drawing is normalized so that the smallest coordinate along each breadth axis ends
+/// up at the origin `input` gives, and the root at its coordinate along the depth axis.
+/// Applying it twice to the same tree gives the same coordinates.
+///
+/// # Panics
+///
+/// If a node with children asks for its family along the depth axis, through its own
+/// [`Node3::axis`] or through the rule.
 pub fn layout3(arena: &mut Arena3, input: &LayoutInput3) {
     layout3_with(arena, input, &mut Callbacks3::default());
 }
@@ -1030,14 +1132,16 @@ pub fn layout3(arena: &mut Arena3, input: &LayoutInput3) {
 /// [`layout3`], with the two observation hooks.
 pub fn layout3_with(arena: &mut Arena3, input: &LayoutInput3, cb: &mut Callbacks3) {
     let root = input.root;
+    let frame = Frame::new(input.depth);
 
     let on = crate::trace::enabled();
     let mut sum = std::time::Duration::ZERO;
 
     trace!(
-        "layout3      root=#{} arena={} centered={} rule={:?} origin=({}, {}, {})",
+        "layout3      root=#{} arena={} depth={:?} centered={} rule={:?} origin=({}, {}, {})",
         arena[root].idx,
         arena.len(),
+        input.depth,
         input.centered,
         input.rule,
         input.x,
@@ -1046,28 +1150,210 @@ pub fn layout3_with(arena: &mut Arena3, input: &LayoutInput3, cb: &mut Callbacks
     );
 
     let t = crate::trace::start();
-    let height = setup_walk(arena, input, root, 0);
+    let height = setup_walk(arena, input, frame, root, 0);
     sum += phase!(t, "setup", "height={height}");
 
     let t = crate::trace::start();
-    first_walk(arena, cb, root);
+    first_walk(arena, cb, frame, root);
     sum += phase!(t, "first");
 
     let t = crate::trace::start();
-    let [minx, minz] = second_walk(arena, input, cb, root, [0.0, 0.0]);
-    sum += phase!(t, "second", "minx={minx} minz={minz}");
+    let mins = second_walk(arena, input, cb, frame, root, [0.0, 0.0]);
+    sum += phase!(t, "second", "min={mins:?}");
 
-    let dx = minx - input.x;
-    let dy = 0.0 - input.y;
-    let dz = minz - input.z;
+    let delta = deltas(frame, mins, [input.x, input.y, input.z]);
 
     let t = crate::trace::start();
-    if dx != 0.0 || dy != 0.0 || dz != 0.0 {
-        third_walk(arena, root, dx, dy, dz);
-        sum += phase!(t, "third", "dx={dx} dy={dy} dz={dz}");
+    if delta.iter().any(|&d| d != 0.0) {
+        third_walk(arena, root, delta);
+        sum += phase!(t, "third", "delta={delta:?}");
     } else {
         sum += phase!(t, "third", "already at the origin");
     }
 
     total!(on, sum);
+}
+
+/// How to lay out a tree given as arrays; [`LayoutInput3`] without the root.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ApiInput3 {
+    /// The depth axis.
+    pub depth: Axis,
+    /// Whether the coordinates should denote the middle of each box rather than its corner.
+    pub centered: bool,
+    /// The family axis of every node; the heights [`AxisRule::Alternate`] goes by are the
+    /// tree's own, the gap nodes left out.
+    pub rule: AxisRule,
+    /// Where the drawing starts along `x`.
+    pub x: f64,
+    /// Where the drawing starts along `y`.
+    pub y: f64,
+    /// Where the drawing starts along `z`.
+    pub z: f64,
+}
+
+/// Where the children of every node start in the adjacency of `children`.
+pub(crate) fn offsets(n: usize, children: &[usize]) -> Vec<usize> {
+    assert!(children.len() >= n, "`children` starts with {n} counts");
+    let mut off = Vec::with_capacity(n);
+    let mut acc = n;
+    for &count in &children[..n] {
+        off.push(acc);
+        acc += count;
+    }
+    assert!(
+        children.len() >= acc,
+        "the adjacency is shorter than the counts promise"
+    );
+    off
+}
+
+/// The height of every node the root reaches, gap nodes left out; 0 elsewhere.
+pub(crate) fn heights(n: usize, children: &[usize], off: &[usize], rooti: usize) -> Vec<usize> {
+    let mut order = Vec::with_capacity(n);
+    let mut stack = vec![rooti - 1];
+    while let Some(s) = stack.pop() {
+        order.push(s);
+        stack.extend((0..children[s]).map(|k| children[off[s] + k] - 1));
+    }
+
+    let mut height = vec![0; n];
+    for &s in order.iter().rev() {
+        for k in 0..children[s] {
+            let c = children[off[s] + k] - 1;
+            if height[c] + 1 > height[s] {
+                height[s] = height[c] + 1;
+            }
+        }
+    }
+    height
+}
+
+/// Builds the arena of the flat description used by [`layout_api3`], the counterpart of
+/// [`crate::reify_flat_chunks`].
+///
+/// Every node gets an invisible gap node above it, with no margin: node `i` is `nodes[i]`
+/// and its gap node `nodes[i + n]`, so the root of the tree is `nodes[rooti - 1 + n]`. The
+/// family axes are resolved here, by the rule and the heights of the tree without its gap
+/// nodes, and set on every node; a gap node takes the axis of the node below it.
+///
+/// # Panics
+///
+/// If the arrays are shorter than the layouts documented in [`layout_api3`], or if the rule
+/// asks for a family along the depth axis.
+pub fn reify3(
+    n: usize,
+    whd: &[f64],
+    gaps: &[f64],
+    children: &[usize],
+    rooti: usize,
+    input: &ApiInput3,
+) -> (Arena3, Vec<NodeId>) {
+    assert!(
+        whd.len() >= 4 * n,
+        "`whd` holds w, h, d and margin for {n} nodes"
+    );
+    assert!(
+        gaps.len() >= 3 * n,
+        "`gaps` holds w, h and d for {n} gap nodes"
+    );
+    assert!(
+        (1..=n).contains(&rooti),
+        "`rooti` is a one-based index into {n} nodes"
+    );
+
+    let off = offsets(n, children);
+    let height = heights(n, children, &off, rooti);
+    let frame = Frame::new(input.depth);
+
+    let mut arena = Arena3::with_capacity(2 * n);
+    let mut nodes = Vec::with_capacity(2 * n);
+
+    for i in 0..n {
+        nodes.push(arena.add_node(i + 1, whd[i], whd[i + n], whd[i + 2 * n], whd[i + 3 * n]));
+    }
+
+    for i in 0..n {
+        let gap = arena.add_node(i + 1 + n, gaps[i], gaps[i + n], gaps[i + 2 * n], 0.0);
+        arena.push_child(gap, nodes[i]);
+        nodes.push(gap);
+    }
+
+    for i in 0..n {
+        for k in 0..children[i] {
+            let c = children[off[i] + k];
+            arena.push_child(nodes[i], nodes[c - 1 + n]);
+        }
+
+        let fam = if children[i] == 0 {
+            0
+        } else {
+            frame.family(None, input.rule, height[i])
+        };
+        let ax = Some(Axis::of(frame.breadth[fam]));
+        arena[nodes[i]].axis = ax;
+        arena[nodes[i + n]].axis = ax;
+    }
+
+    (arena, nodes)
+}
+
+/// Lays out a tree given as parallel arrays, the counterpart of [`crate::layout_api`].
+///
+/// * `whd` — `4n` values, `[w_0..w_n-1, h_0.., d_0.., margin_0..]`; on return the first `3n`
+///   are overwritten with `[x_0.., y_0.., z_0..]`
+/// * `gaps` — `3n` values, the `w`, `h` and `d` of the invisible node inserted above every
+///   node, which is what spaces the levels apart; it keeps no margin
+/// * `children` — `n` counts followed by the adjacency, one-based, grouped by parent
+/// * `rooti` — the one-based index of the root
+///
+/// A node the root does not reach is left at the origin.
+///
+/// # Panics
+///
+/// If the arrays are shorter than that, if `rooti` is out of range, or if the rule asks
+/// for a family along the depth axis.
+pub fn layout_api3(
+    n: usize,
+    whd: &mut [f64],
+    gaps: &[f64],
+    children: &[usize],
+    rooti: usize,
+    input: &ApiInput3,
+) {
+    trace!(
+        "layout_api3  n={n} rooti={rooti} depth={:?} centered={} rule={:?} origin=({}, {}, {})",
+        input.depth,
+        input.centered,
+        input.rule,
+        input.x,
+        input.y,
+        input.z
+    );
+
+    let t = crate::trace::start();
+    let (mut arena, nodes) = reify3(n, whd, gaps, children, rooti, input);
+    phase!(t, "reify", "arena={}", arena.len());
+
+    layout3(
+        &mut arena,
+        &LayoutInput3 {
+            root: nodes[rooti - 1 + n],
+            depth: input.depth,
+            centered: input.centered,
+            rule: input.rule,
+            x: input.x,
+            y: input.y,
+            z: input.z,
+        },
+    );
+
+    let t = crate::trace::start();
+    for (i, &v) in nodes[..n].iter().enumerate() {
+        let node = &arena[v];
+        whd[i] = node.x;
+        whd[i + n] = node.y;
+        whd[i + 2 * n] = node.z;
+    }
+    phase!(t, "write", "{n} coordinate triples");
 }
