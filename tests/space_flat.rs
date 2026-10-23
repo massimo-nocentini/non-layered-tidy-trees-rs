@@ -412,3 +412,36 @@ fn a_family_along_the_depth_axis_is_refused() {
         },
     );
 }
+
+/// A tree that is a small part of its arena: the sweeps write back in their own order
+/// there, rather than in the arena's.
+#[test]
+fn a_subtree_of_a_larger_arena() {
+    for k in 0..50u64 {
+        let (mut a, root) = tree(4000 + k, 5, 4, Regime::Varied, &[Axis::X, Axis::Z]);
+        let Some(&sub) = a
+            .children(root)
+            .iter()
+            .max_by_key(|&&c| a.preorder(c).len())
+        else {
+            continue;
+        };
+        let mut b = a.clone();
+        let input = LayoutInput3 {
+            rule: AxisRule::Alternate,
+            ..LayoutInput3::new(sub)
+        };
+
+        layout3(&mut a, &input);
+        Engine3::new().layout(&mut b, &input);
+
+        for v in a.preorder(root) {
+            assert_eq!(bits(&a, v), bits(&b, v), "#{} differs", a[v].idx);
+            assert_eq!(
+                a[v].parent, b[v].parent,
+                "the parent of #{} differs",
+                a[v].idx
+            );
+        }
+    }
+}
