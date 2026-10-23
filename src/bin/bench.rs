@@ -10,11 +10,20 @@
 //! cargo run --release --bin bench      # the recursive and the flat paths
 //! make -C ../test bench                 # the C row of the same table
 //! ```
+//!
+//! A second table times the 3D layout of `space` over the same trees, lifted with a `d` per
+//! box. Its `-x` rows lay every family along the 2D breadth axis and print the 2D checksum,
+//! which they have to share with the 2D rows; the other rows alternate the axes by height
+//! and print a checksum over all three coordinates. `vert` 0 is the depth along `x`.
 
 use std::env;
 use std::time::Instant;
 
 use non_layered_tidy_trees::flat::Engine;
+use non_layered_tidy_trees::space::flat::{layout3_flat, layout_api3_flat, Engine3};
+use non_layered_tidy_trees::space::{
+    layout3, layout_api3, ApiInput3, Arena3, Axis, AxisRule, LayoutInput3,
+};
 use non_layered_tidy_trees::treegen;
 use non_layered_tidy_trees::{flat, layout, layout_api, Arena, LayoutInput};
 
@@ -187,6 +196,184 @@ fn best_api_ms(f: &mut ApiRunner, case: &mut ApiCase, reps: usize) -> f64 {
     best
 }
 
+/// One implementation of the 3D layout, and whether its checksum is the 2D one.
+type Runner3 = Box<dyn FnMut(&mut Arena3, &LayoutInput3)>;
+
+fn impls3() -> Vec<(&'static str, Runner3, bool)> {
+    let mut engine = Engine3::new();
+    let mut engine_x = Engine3::new();
+    let along = |i: &LayoutInput3| LayoutInput3 {
+        rule: if i.depth == Axis::Y {
+            AxisRule::AllX
+        } else {
+            AxisRule::AllY
+        },
+        ..*i
+    };
+    vec![
+        ("rust-3d", Box::new(layout3), false),
+        ("rust-3d-flat", Box::new(layout3_flat), false),
+        (
+            "rust-3d-flat-r",
+            Box::new(move |a: &mut Arena3, i: &LayoutInput3| engine.layout(a, i)),
+            false,
+        ),
+        (
+            "rust-3d-x",
+            Box::new(move |a: &mut Arena3, i: &LayoutInput3| layout3(a, &along(i))),
+            true,
+        ),
+        (
+            "rust-3d-flat-r-x",
+            Box::new(move |a: &mut Arena3, i: &LayoutInput3| engine_x.layout(a, &along(i))),
+            true,
+        ),
+    ]
+}
+
+/// The tree of `bench_tree`, with a `d` per box drawn from a stream of its own.
+fn bench_tree3(n: usize) -> (Arena3, non_layered_tidy_trees::NodeId) {
+    let mut flat = Arena::with_capacity(n);
+    let root = treegen::bench_tree(&mut flat, n, MAXKIDS, SEED);
+    let mut rng = treegen::Rng::new(SEED ^ 0x5DEE_CE66);
+    Arena3::lift(&flat, root, |_| (10 + rng.rand(40)) as f64)
+}
+
+fn best3_ms(f: &mut Runner3, arena: &mut Arena3, input: &LayoutInput3, reps: usize) -> f64 {
+    let t0 = Instant::now();
+    f(arena, input);
+    let warm = t0.elapsed().as_secs_f64() * 1e3;
+    let inner = if warm > 0.0 {
+        ((20.0 / warm) as usize).clamp(1, 1000)
+    } else {
+        1000
+    };
+
+    let mut best = f64::INFINITY;
+    for _ in 0..reps {
+        let s = Instant::now();
+        for _ in 0..inner {
+            f(arena, input);
+        }
+        best = best.min(s.elapsed().as_secs_f64() * 1e3 / inner as f64);
+    }
+    best
+}
+
+fn checksum3(arena: &Arena3, flat: bool) -> u64 {
+    arena.iter().fold(0u64, |ck, n| {
+        ck ^ n.x.to_bits() ^ n.y.to_bits() ^ if flat { 0 } else { n.z.to_bits() }
+    })
+}
+
+/// `layout_api3` over the arrays of `bench_arrays`, with a `d` for every node and gap node.
+type ApiRunner3 = Box<dyn FnMut(usize, &mut [f64], &[f64], &[usize], &ApiInput3)>;
+
+fn api_impls3() -> Vec<(&'static str, ApiRunner3)> {
+    let mut engine = Engine3::new();
+    vec![
+        (
+            "rust-api3",
+            Box::new(
+                |n, whd: &mut [f64], g: &[f64], c: &[usize], i: &ApiInput3| {
+                    layout_api3(n, whd, g, c, 1, i)
+                },
+            ),
+        ),
+        (
+            "rust-api3-flat",
+            Box::new(
+                |n, whd: &mut [f64], g: &[f64], c: &[usize], i: &ApiInput3| {
+                    layout_api3_flat(n, whd, g, c, 1, i)
+                },
+            ),
+        ),
+        (
+            "rust-api3-flat-r",
+            Box::new(
+                move |n, whd: &mut [f64], g: &[f64], c: &[usize], i: &ApiInput3| {
+                    engine.layout_api(n, whd, g, c, 1, i)
+                },
+            ),
+        ),
+    ]
+}
+
+fn api_case3(n: usize) -> (Vec<f64>, Vec<f64>, Vec<usize>) {
+    let (wh, whg, children) = treegen::bench_arrays(n, MAXKIDS, SEED);
+    let mut rng = treegen::Rng::new(SEED ^ 0x5DEE_CE66);
+    let mut whd = Vec::with_capacity(4 * n);
+    whd.extend_from_slice(&wh[..2 * n]);
+    whd.extend((0..n).map(|_| (10 + rng.rand(40)) as f64));
+    whd.extend_from_slice(&wh[2 * n..3 * n]);
+    let mut gaps = whg;
+    gaps.extend((0..n).map(|_| (10 + rng.rand(40)) as f64 / 4.0));
+    (whd, gaps, children)
+}
+
+fn best_api3_ms(f: &mut ApiRunner3, n: usize, input: &ApiInput3, reps: usize) -> (f64, u64) {
+    let (mut whd, gaps, children) = api_case3(n);
+    let pristine = whd.clone();
+
+    let t0 = Instant::now();
+    f(n, &mut whd, &gaps, &children, input);
+    let warm = t0.elapsed().as_secs_f64() * 1e3;
+    let inner = if warm > 0.0 {
+        ((20.0 / warm) as usize).clamp(1, 1000)
+    } else {
+        1000
+    };
+
+    let mut best = f64::INFINITY;
+    for _ in 0..reps {
+        let s = Instant::now();
+        for _ in 0..inner {
+            whd.copy_from_slice(&pristine);
+            f(n, &mut whd, &gaps, &children, input);
+        }
+        best = best.min(s.elapsed().as_secs_f64() * 1e3 / inner as f64);
+    }
+
+    let ck = whd[..3 * n].iter().fold(0u64, |c, v| c ^ v.to_bits());
+    (best, ck)
+}
+
+/// The second table: the 3D layout over the same trees.
+fn table3(reps: usize) {
+    println!("# 3D");
+    header();
+
+    for n in [1_000usize, 10_000, 100_000, 1_000_000] {
+        for vert in [true, false] {
+            let depth = if vert { Axis::Y } else { Axis::X };
+            for (name, f, flat) in impls3().iter_mut() {
+                let (mut arena, root) = bench_tree3(n);
+                let input = LayoutInput3 {
+                    depth,
+                    rule: AxisRule::Alternate,
+                    ..LayoutInput3::new(root)
+                };
+                let ms = best3_ms(f, &mut arena, &input, reps);
+                row(name, n, vert, ms, checksum3(&arena, *flat));
+            }
+        }
+    }
+
+    for n in [1_000usize, 10_000, 100_000, 1_000_000] {
+        for vert in [true, false] {
+            let input = ApiInput3 {
+                depth: if vert { Axis::Y } else { Axis::X },
+                rule: AxisRule::Alternate,
+                ..ApiInput3::default()
+            };
+            for (name, f) in api_impls3().iter_mut() {
+                let (ms, ck) = best_api3_ms(f, n, &input, reps);
+                row(name, n, vert, ms, ck);
+            }
+        }
+    }
+}
+
 fn checksum(arena: &Arena) -> u64 {
     arena
         .iter()
@@ -277,6 +464,8 @@ fn main() {
             }
         }
     }
+
+    table3(reps);
 
     if let Some(depth) = deep {
         // The recursive path is bounded by the stack, so it runs on a thread with a big

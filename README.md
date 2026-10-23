@@ -114,7 +114,7 @@ assertions.
 | `test/depth.c` | `tests/depth.rs` | a chain of 10 000 levels; the walks run on a thread with a 64 MiB stack, since `cargo test` gives each test 2 MiB |
 | — | `tests/flat.rs` | the sweeps against the recursion, bit for bit: 1 152 trees with their bookkeeping, a reused `Engine`, a 300 000-level chain, and `layout_api_flat` against `layout_api` |
 | `overlap --dump` | `src/bin/dump.rs` | the differential oracle below |
-| — | `tests/space.rs`, `tests/space_overlap.rs` | the 3D layout of [`space`](#three-dimensions) |
+| — | `tests/space.rs`, `tests/space_overlap.rs`, `tests/space_flat.rs` | the 3D layout of [`space`](#three-dimensions) |
 | — | `src/lib.rs` unit tests | `max_bottom` / `max_bottom_between`, which the C suite does not cover; the expected values are the ones the C build prints |
 
 `NLTT_TRIALS` sets the trees per shape (default 300, the C default) and `NLTT_DEPTH` the
@@ -186,9 +186,9 @@ the API path and does not on the `Arena` path, where there are no gap nodes to f
 
 ## Three dimensions
 
-`space` lays a tree out in three dimensions: every node is a box `w` × `h` × `d`, the depth
-axis is `y` and non-layered exactly as above, and the children of a node are spread over
-the `x`–`z` plane.
+`space` lays a tree out in three dimensions: every node is a box `w` × `h` × `d`, one axis
+is the depth axis — `y` unless `LayoutInput3::depth` says otherwise — non-layered exactly as
+above, and the children of a node are spread over the plane of the other two.
 
 ```rust
 use non_layered_tidy_trees::space::{layout3, Arena3, AxisRule, LayoutInput3};
@@ -204,40 +204,74 @@ layout3(&mut arena, &LayoutInput3 { rule: AxisRule::Alternate, ..LayoutInput3::n
 
 The 2D algorithm is linear because merging a subtree into its left siblings is one splice
 of two threaded contours, and a splice needs the siblings in a line. So every internal node
-picks a *family axis*, `x` or `z` — by `AxisRule` (`AllX`, `AllZ`, or `Alternate` by
-subtree height) or by its own `axis` — and
+picks a *family axis*, one of the two breadth axes — by `AxisRule` (`AllX`, `AllY`, `AllZ`,
+or `Alternate` by subtree height) or by its own `axis` — and
 
 * separates its children along that axis with the very same `separate`, sibling chain,
   `move_subtree` and `position_root`, over the contours along that axis;
 * centres each child under its own box along the other axis.
 
-Each subtree keeps four threaded contours, left and right along `x` and `z`. Along the
-family axis they are the 2D splice. Along the other axis the children are stacked in depth
-rather than side by side, so the contour is the node, then one *hull* item covering the
-depths down to the second deepest child with the extreme of all of them there, then a
+Each subtree keeps four threaded contours, left and right along both breadth axes. Along
+the family axis they are the 2D splice. Along the other axis the children are stacked in
+depth rather than side by side, so the contour is the node, then one *hull* item covering
+the depths down to the second deepest child with the extreme of all of them there, then a
 thread into the deepest child's own contour. Either way a merge is a prefix plus one
 thread, and the layout stays linear.
 
-What it keeps, and what pins it down in `tests/space.rs` and `tests/space_overlap.rs`:
+The entry points mirror the 2D ones:
+
+| 2D | 3D |
+|---|---|
+| `layout`, `layout_with` | `space::layout3`, `space::layout3_with` |
+| `vertically` | `LayoutInput3::depth`, any of `x`, `y`, `z` |
+| `layout_api`, `reify_flat_chunks` | `space::layout_api3`, `space::reify3`: `whd` is `[w.., h.., d.., margin..]`, `gaps` the `w`, `h`, `d` of the gap nodes |
+| `flat::layout_flat`, `flat::Engine`, `flat::layout_api_flat` | `space::flat::layout3_flat`, `space::flat::Engine3`, `space::flat::layout_api3_flat` |
+
+The flat path is the same algorithm over a breadth-first struct-of-arrays mirror, swept
+forwards and backwards with no recursion at all, bit for bit the recursive coordinates. It
+keeps each gap node of the array API as an entry of its own rather than folding it into a
+band, since a fold would have to carry a second set of hulls.
+
+What it keeps, and what pins it down in `tests/space.rs`, `tests/space_overlap.rs` and
+`tests/space_flat.rs`:
 
 | | |
 |---|---|
 | no two boxes overlap, and margins hold along the separating axis | every pair, over the corpus of `tests/overlap.rs` with a `d` per box, under every rule and a random axis per node, plus boxes of zero extent |
-| `AllX` is the 2D drawing: `x` and `y` bit for bit those of `layout`, whatever `d` is | the same corpus, both centring modes; `AllZ` likewise against `layout` with `d` for `w` |
+| `AllX` is the 2D drawing: `x` and `y` bit for bit those of `layout`, whatever `d` is | the same corpus, both centring modes; `AllZ` likewise against `layout` with `d` for `w`; the depth along `x` with `AllY` against `layout` with `vertically` off; `layout_api3` against `layout_api` |
+| another depth axis is a renaming of the axes | the depth along `x` and along `z` against the depth along `y` with the extents and axes swapped, bit for bit |
+| the sweeps are the recursion | bit for bit, bookkeeping included, along every depth axis and under every rule; `layout_api3_flat` against `layout_api3` with unreached nodes; a chain of 300 000 levels on the default stack |
 | parent centred over its first and last child, children in order, along the family axis; each child centred under its parent along the other | random trees, every rule |
-| reversing every family mirrors the drawing along `x` and `z`, without margins | random trees, every rule |
+| reversing every family mirrors the drawing along both breadth axes, without margins | random trees, every rule |
 | isomorphic subtrees drawn alike | two copies of a subtree around a third |
 | normalization, repeatability, `centered` as one rigid translation | as in `tests/properties.rs` |
 | linear | 1.3–1.9 contour pairs per node from 2 000 to 32 000 nodes, on random, binary and spine shapes |
+| the exact-arithmetic model of the design | `python3 prototype/xcheck.py`: 2 000 random trees within 1e-9 of `prototype/proto.py`, see [`prototype/`](prototype/README.md) |
 
 The price is compactness: siblings are separated along their family's axis even where they
 are already apart along the other one, and a hull keeps a subtree's full extent at every
 depth it covers.
 
-On the Xeon of the benchmarks below, release build, ns/node over `bench_tree` lifted with a
-random `d`: `layout` 96 / 85 / 111, `layout3` with `AllX` 151 / 203 / 268 at 10 000 / 100 000 /
-1 000 000 nodes, `Alternate` within 3% of `AllX`. `Node3` carries both axes and its hulls,
-so the walks have more memory to go through. There is no flat port of it yet.
+`make bench` prints a second table for the 3D layout over the same trees, lifted with a `d`
+per box. Its `-x` rows lay every family along the 2D breadth axis and carry the 2D checksum,
+which they share with the `rust-rec` rows at every size. Best of 3, ns/node, `Alternate`,
+depth along `y`, on the Xeon below:
+
+| impl | 1 000 | 10 000 | 100 000 | 1 000 000 |
+|---|---:|---:|---:|---:|
+| `rust-rec` (2D, for scale) | 66.4 | 78.9 | 84.5 | 131.6 |
+| `rust-3d` | 122.1 | 154.3 | 216.4 | 287.3 |
+| `rust-3d-flat` | 143.4 | 186.4 | 323.5 | 547.6 |
+| `rust-3d-flat-r` | 129.4 | 176.6 | 307.6 | 433.1 |
+| `rust-api3` | 380.4 | 438.3 | 746.1 | 1222.4 |
+| `rust-api3-flat` | 258.4 | 284.6 | 403.2 | 729.9 |
+| `rust-api3-flat-r` | 240.4 | 275.7 | 385.0 | **515.2** |
+
+The same shape as in 2D: over an `Arena3` the mirror is a loss, since the arena is already
+one contiguous `Vec` and the copy in and out costs more than it saves; over arrays there is
+no tree to build, and the sweeps are 1.6–2.4× faster than reifying one. A `Node3` carries
+both breadth axes and two hulls, so every walk has about twice the memory to go through of
+its 2D counterpart.
 
 ## Benchmarks
 
