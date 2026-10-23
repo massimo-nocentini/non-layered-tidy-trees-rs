@@ -31,7 +31,7 @@
 //! The sweeps visit nodes in a different order than the recursion, which is why this path
 //! takes no callbacks, like [`crate::flat`].
 
-use super::{deltas, heights, offsets, ApiInput3, Arena3, Axis, Frame, LayoutInput3};
+use super::{deltas, heights, longest, offsets, ApiInput3, Arena3, Axis, Frame, LayoutInput3};
 use crate::{update_chain, ChainLink, NodeId};
 
 /// The absence of an item.
@@ -219,6 +219,18 @@ const NO_EXTREMES: Extremes = Extremes {
     mser: [0.0; 2],
 };
 
+/// What a thread setter overwrites in the item it threads; see `super::Saved`.
+#[derive(Debug, Clone, Copy)]
+enum Saved {
+    Band {
+        b: usize,
+        band: Band,
+        tl: [usize; 2],
+        tr: [usize; 2],
+    },
+    Hull(usize, Hull),
+}
+
 /// The state of a hull; see `super::Hull`.
 #[derive(Debug, Clone, Copy)]
 struct Hull {
@@ -254,6 +266,8 @@ struct Mirror {
     modsum: Vec<[f64; 2]>,
 
     link: Vec<Link>,
+    /// Whether the family axis is left to a trial of both, [`AxisRule::Compact`].
+    trial: Vec<bool>,
     ex: Vec<Extremes>,
     /// `[shift, change]`, along the family axis of the parent.
     spread: Vec<[f64; 2]>,
@@ -282,6 +296,9 @@ struct Mirror {
     stack: Vec<usize>,
     /// Where each node of the arena is in the mirror, for the write back.
     pos: Vec<usize>,
+    /// What the thread setters overwrite during a trial, when `logging`.
+    log: Vec<Saved>,
+    logging: bool,
 }
 
 /// `v` becomes `n` copies of `zero`, keeping whatever it already allocated.
@@ -327,6 +344,7 @@ impl Mirror {
         self.band.clear();
         self.depth.clear();
         self.link.clear();
+        self.trial.clear();
         self.parent.clear();
         self.childno.clear();
         self.level.clear();
@@ -348,6 +366,7 @@ impl Mirror {
 
     fn push_entry(&mut self, parent: usize, childno: usize) {
         self.link.push(LEAF);
+        self.trial.push(false);
         self.parent.push(parent);
         self.childno.push(childno);
         self.level.push(if parent == NONE {
@@ -453,11 +472,13 @@ impl Mirror {
 
             // The family axes go by the heights of the tree without its gap nodes, as
             // `reify3` sets them; a gap node shares the axis of the node below it.
-            self.link[e].fam = if children[s] == 0 {
-                0
+            let fam = if children[s] == 0 {
+                Some(0)
             } else {
-                frame.family(None, input.rule, height[s]) as u32
+                frame.family(None, input.rule, height[s])
             };
+            self.trial[e] = fam.is_none();
+            self.link[e].fam = fam.unwrap_or(0) as u32;
             e += 1;
         }
 
@@ -495,7 +516,9 @@ impl Mirror {
                 }
             }
             height[v] = h;
-            self.link[v].fam = frame.family(self.axis[v], input.rule, h) as u32;
+            let fam = frame.family(self.axis[v], input.rule, h);
+            self.trial[v] = fam.is_none();
+            self.link[v].fam = fam.unwrap_or(0) as u32;
         }
 
         self.height = height;
@@ -681,6 +704,10 @@ impl Mirror {
         let c0 = self.link[t].first;
         let ci = c0 + i;
         let li = self.ex[c0].el[ax];
+        if self.logging {
+            let saved = self.save(li);
+            self.log.push(saved);
+        }
 
         let diff = (modsumcl - self.item_modifier(cl, ax)) - self.ex[c0].msel[ax];
 
@@ -695,6 +722,10 @@ impl Mirror {
         let ci = self.link[t].first + i;
         let cp = ci - 1;
         let ri = self.ex[ci].er[ax];
+        if self.logging {
+            let saved = self.save(ri);
+            self.log.push(saved);
+        }
         let diff = (modsumsr - self.item_modifier(sr, ax)) - self.ex[ci].mser[ax];
 
         self.set_thread(ri, RIGHT, ax, sr);
@@ -865,8 +896,7 @@ impl Mirror {
     /// `first_walk` of the node of entry `t`, whose children present their top bands.
     fn first_node(&mut self, t: usize, chain: &mut Vec<ChainLink>) {
         let tb = self.con(t);
-        let l = self.link[t];
-        let k = l.count as usize;
+        let k = self.link[t].count as usize;
 
         if k == 0 {
             self.ex[t] = Extremes {
@@ -881,7 +911,21 @@ impl Mirror {
             return;
         }
 
-        let ax = l.fam as usize;
+        if self.trial[t] {
+            self.compact(t, chain);
+        } else {
+            let ax = self.link[t].fam as usize;
+            self.family(t, ax, chain);
+        }
+
+        self.finish(t);
+    }
+
+    /// See `super::family`.
+    fn family(&mut self, t: usize, ax: usize, chain: &mut Vec<ChainLink>) {
+        let tb = self.con(t);
+        let l = self.link[t];
+        let k = l.count as usize;
         let b = 1 - ax;
         let c0 = l.first;
         let last = c0 + k - 1;
@@ -916,6 +960,107 @@ impl Mirror {
             self.ex[c].msel[b] += off;
             self.ex[c].mser[b] += off;
         }
+    }
+
+    fn save(&self, it: usize) -> Saved {
+        let nb = self.bands();
+        if it < nb {
+            let v = if self.paired { it >> 1 } else { it };
+            Saved::Band {
+                b: it,
+                band: self.band[it],
+                tl: self.link[v].tl,
+                tr: self.link[v].tr,
+            }
+        } else {
+            Saved::Hull(it - nb, self.hulls[it - nb])
+        }
+    }
+
+    fn restore(&mut self, s: Saved) {
+        match s {
+            Saved::Band { b, band, tl, tr } => {
+                let v = if self.paired { b >> 1 } else { b };
+                self.band[b] = band;
+                self.link[v].tl = tl;
+                self.link[v].tr = tr;
+            }
+            Saved::Hull(h, hull) => self.hulls[h] = hull,
+        }
+    }
+
+    /// See `super::compact`.
+    fn compact(&mut self, t: usize, chain: &mut Vec<ChainLink>) {
+        let tb = self.con(t);
+        let l = self.link[t];
+        let kids: Vec<(Band, Extremes, [f64; 2])> = (l.first..l.first + l.count as usize)
+            .map(|c| (self.band[self.top_band(c)], self.ex[c], self.spread[c]))
+            .collect();
+        let prelim = self.band[tb].prelim;
+
+        let undo = |m: &mut Mirror| {
+            while let Some(s) = m.log.pop() {
+                m.restore(s);
+            }
+            for (i, &(band, ex, spread)) in kids.iter().enumerate() {
+                let c = l.first + i;
+                let cb = m.top_band(c);
+                m.band[cb] = band;
+                m.ex[c] = ex;
+                m.spread[c] = spread;
+            }
+            m.band[tb].prelim = prelim;
+        };
+
+        self.log.clear();
+        self.logging = true;
+        self.family(t, 0, chain);
+        let first = longest(&self.extent(t, 0));
+        undo(self);
+
+        self.family(t, 1, chain);
+        let second = longest(&self.extent(t, 1));
+        self.logging = false;
+
+        let ax = if first <= second {
+            undo(self);
+            self.family(t, 0, chain);
+            0
+        } else {
+            self.log.clear();
+            1
+        };
+        self.link[t].fam = ax as u32;
+    }
+
+    /// See `super::extent`.
+    fn extent(&self, t: usize, ax: usize) -> [f64; 4] {
+        let l = self.link[t];
+        let own = self.band[self.con(t)];
+        let mut bbox = [0.0, own.ext[0] + own.margin, 0.0, own.ext[1] + own.margin];
+        let origin = own.prelim;
+        let (mut d, mut modsumdelta) = (0.0, 0.0);
+        for c in l.first..l.first + l.count as usize {
+            d += self.spread[c][0];
+            modsumdelta += d + self.spread[c][1];
+            let band = &self.band[self.top_band(c)];
+            let mut rel = [
+                band.prelim[0] + band.modifier[0] - origin[0],
+                band.prelim[1] + band.modifier[1] - origin[1],
+            ];
+            rel[ax] += modsumdelta;
+            union(&mut bbox, rel, &self.bbox[c]);
+        }
+        bbox
+    }
+
+    /// See `super::finish`.
+    fn finish(&mut self, t: usize) {
+        let l = self.link[t];
+        let k = l.count as usize;
+        let ax = l.fam as usize;
+        let b = 1 - ax;
+        let c0 = l.first;
 
         let mut d1 = f64::NEG_INFINITY;
         let mut j1 = 0;
@@ -944,32 +1089,19 @@ impl Mirror {
             self.hull_contour(t, b, RIGHT, j1, d2);
         }
 
-        let own = self.band[tb];
-        let mut bbox = [0.0, own.ext[0] + own.margin, 0.0, own.ext[1] + own.margin];
-        let origin = own.prelim;
-        let (mut d, mut modsumdelta) = (0.0, 0.0);
-        for c in c0..c0 + k {
-            d += self.spread[c][0];
-            modsumdelta += d + self.spread[c][1];
-            let band = &self.band[self.top_band(c)];
-            let mut rel = [
-                band.prelim[0] + band.modifier[0] - origin[0],
-                band.prelim[1] + band.modifier[1] - origin[1],
-            ];
-            rel[ax] += modsumdelta;
-            union(&mut bbox, rel, &self.bbox[c]);
-        }
-
+        let bbox = self.extent(t, ax);
+        let bot = self.band[self.con(t)].bot;
         self.bbox[t] = bbox;
-        self.maxdepth[t] = if d1 > own.bot { d1 } else { own.bot };
+        self.maxdepth[t] = if d1 > bot { d1 } else { bot };
     }
 
     /// `first_walk` of the gap node of entry `t`, one child: the node below it. The
     /// extremes along both axes are the node's already, and so is the subtree's depth.
     fn first_gap(&mut self, t: usize) {
+        // A gap node is laid out along the first breadth axis, as `reify3` sets it.
         let (g, c) = (2 * t, 2 * t + 1);
-        let ax = self.link[t].fam as usize;
-        let b = 1 - ax;
+        let ax = 0;
+        let b = 1;
 
         // position_root, with the node as first and last child
         let (gb, cb) = (self.band[g], self.band[c]);
@@ -1028,7 +1160,7 @@ impl Mirror {
 
                 let d = 0.0 + 0.0;
                 let modsumdelta = 0.0 + (d + 0.0);
-                self.band[g + 1].modifier[ax] += modsumdelta;
+                self.band[g + 1].modifier[0] += modsumdelta;
             }
 
             let c = self.con(v);

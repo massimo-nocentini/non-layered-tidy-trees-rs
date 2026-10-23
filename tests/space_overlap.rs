@@ -33,8 +33,8 @@ fn depth_of(regime: Regime, rng: &mut Rng) -> f64 {
     }
 }
 
-/// The rules swept: the three of `AxisRule`, then a coin flip per node.
-const RULES: usize = 4;
+/// The rules swept: `AllX`, `AllZ`, `Alternate`, a coin flip per node, then `Compact`.
+const RULES: usize = 5;
 
 fn tree(
     seed: u64,
@@ -62,6 +62,7 @@ fn rule_of(rule: usize) -> AxisRule {
         AxisRule::AllZ,
         AxisRule::Alternate,
         AxisRule::AllX,
+        AxisRule::Compact,
     ][rule]
 }
 
@@ -195,7 +196,12 @@ fn degenerate_boxes() {
             }
         }
 
-        for rule in [AxisRule::AllX, AxisRule::AllZ, AxisRule::Alternate] {
+        for rule in [
+            AxisRule::AllX,
+            AxisRule::AllZ,
+            AxisRule::Alternate,
+            AxisRule::Compact,
+        ] {
             layout3(
                 &mut a,
                 &LayoutInput3 {

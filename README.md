@@ -205,7 +205,7 @@ layout3(&mut arena, &LayoutInput3 { rule: AxisRule::Alternate, ..LayoutInput3::n
 The 2D algorithm is linear because merging a subtree into its left siblings is one splice
 of two threaded contours, and a splice needs the siblings in a line. So every internal node
 picks a *family axis*, one of the two breadth axes — by `AxisRule` (`AllX`, `AllY`, `AllZ`,
-or `Alternate` by subtree height) or by its own `axis` — and
+`Alternate` by subtree height, or `Compact`, below) or by its own `axis` — and
 
 * separates its children along that axis with the very same `separate`, sibling chain,
   `move_subtree` and `position_root`, over the contours along that axis;
@@ -227,10 +227,28 @@ The entry points mirror the 2D ones:
 | `layout_api`, `reify_flat_chunks` | `space::layout_api3`, `space::reify3`: `whd` is `[w.., h.., d.., margin..]`, `gaps` the `w`, `h`, `d` of the gap nodes |
 | `flat::layout_flat`, `flat::Engine`, `flat::layout_api_flat` | `space::flat::layout3_flat`, `space::flat::Engine3`, `space::flat::layout_api3_flat` |
 
-The flat path is the same algorithm over a breadth-first struct-of-arrays mirror, swept
-forwards and backwards with no recursion at all, bit for bit the recursive coordinates. It
-keeps each gap node of the array API as an entry of its own rather than folding it into a
-band, since a fold would have to carry a second set of hulls.
+The flat path is the same algorithm over a struct-of-arrays mirror, swept forwards and
+backwards with no recursion at all, bit for bit the recursive coordinates. It is laid out
+for the contour walk: what one step reads about a box is one 64-byte band, a cache line,
+and what it reads about a node to find the next step is one link. From the arrays of the
+API it folds the gap node above every node into the node's entry as its upper band, as the
+2D mirror does. That is sound in 3D because a gap node has one child: its contours run
+straight into the node below along both axes, and it never builds a hull.
+
+`Compact` lays every family out along both breadth axes and keeps the one that gives the
+subtree the shorter longest side, undoing the other. The first walk then does up to three
+times its work and stays linear, since a trial only steps past contour items that the kept
+axis's hull then hides. It is greedy, and not a better default than `Alternate`: it squares
+every subtree, and a wide family then lines the squares up into a strip. The median longest
+side, `Compact` over `Alternate`, 30 `bench_tree`s a cell:
+
+| children per node | 100 | 1 000 | 10 000 | 100 000 |
+|---|---:|---:|---:|---:|
+| at most 2 | 0.89 | 0.84 | 0.75 | 0.76 |
+| at most 4 | 0.78 | 0.84 | 1.04 | 1.22 |
+| at most 8 | 0.91 | 0.88 | 1.72 | 1.94 |
+
+It is worth it for narrow trees, and for small ones, not as a rule.
 
 What it keeps, and what pins it down in `tests/space.rs`, `tests/space_overlap.rs` and
 `tests/space_flat.rs`:
@@ -245,8 +263,8 @@ What it keeps, and what pins it down in `tests/space.rs`, `tests/space_overlap.r
 | reversing every family mirrors the drawing along both breadth axes, without margins | random trees, every rule |
 | isomorphic subtrees drawn alike | two copies of a subtree around a third |
 | normalization, repeatability, `centered` as one rigid translation | as in `tests/properties.rs` |
-| linear | 1.3–1.9 contour pairs per node from 2 000 to 32 000 nodes, on random, binary and spine shapes |
-| the exact-arithmetic model of the design | `python3 prototype/xcheck.py`: 2 000 random trees within 1e-9 of `prototype/proto.py`, see [`prototype/`](prototype/README.md) |
+| linear | 1.0–1.9 contour pairs per node from 2 000 to 32 000 nodes, on random, binary and spine shapes; 2.5–4.3 under `Compact` |
+| the exact-arithmetic model of the design | `python3 prototype/xcheck.py`: 2 000 random trees within 1e-9 of `prototype/proto.py` with its axes given, and 2 000 with `Compact` choosing them against the prototype's own trial rule; see [`prototype/`](prototype/README.md) |
 
 The price is compactness: siblings are separated along their family's axis even where they
 are already apart along the other one, and a hull keeps a subtree's full extent at every
@@ -254,24 +272,26 @@ depth it covers.
 
 `make bench` prints a second table for the 3D layout over the same trees, lifted with a `d`
 per box. Its `-x` rows lay every family along the 2D breadth axis and carry the 2D checksum,
-which they share with the `rust-rec` rows at every size. Best of 3, ns/node, `Alternate`,
-depth along `y`, on the Xeon below:
+which they share with the `rust-rec` rows at every size. Best of 3, ns/node, `Alternate`
+unless the row says `Compact`, depth along `y`, on the Xeon below:
 
 | impl | 1 000 | 10 000 | 100 000 | 1 000 000 |
 |---|---:|---:|---:|---:|
-| `rust-rec` (2D, for scale) | 66.4 | 78.9 | 84.5 | 131.6 |
-| `rust-3d` | 122.1 | 154.3 | 216.4 | 287.3 |
-| `rust-3d-flat` | 143.4 | 186.4 | 323.5 | 547.6 |
-| `rust-3d-flat-r` | 129.4 | 176.6 | 307.6 | 433.1 |
-| `rust-api3` | 380.4 | 438.3 | 746.1 | 1222.4 |
-| `rust-api3-flat` | 258.4 | 284.6 | 403.2 | 729.9 |
-| `rust-api3-flat-r` | 240.4 | 275.7 | 385.0 | **515.2** |
+| `rust-rec` (2D, for scale) | 67.5 | 83.8 | 83.8 | 134.6 |
+| `rust-3d` | 137.6 | 166.1 | 243.2 | 311.6 |
+| `rust-3d-flat` | 157.3 | 188.0 | 291.3 | 425.1 |
+| `rust-3d-flat-r` | 145.4 | 173.8 | 269.2 | **306.7** |
+| `rust-3d-compact` (`Compact`) | 314.3 | 340.5 | 414.7 | 486.9 |
+| `rust-3d-flat-r-c` (`Compact`) | 289.9 | 316.4 | 418.5 | 457.3 |
+| `rust-api3` | 410.2 | 464.6 | 1161.7 | 1264.1 |
+| `rust-api3-flat` | 204.1 | 225.9 | 287.5 | 600.4 |
+| `rust-api3-flat-r` | 188.0 | 202.4 | 252.6 | **349.9** |
 
-The same shape as in 2D: over an `Arena3` the mirror is a loss, since the arena is already
-one contiguous `Vec` and the copy in and out costs more than it saves; over arrays there is
-no tree to build, and the sweeps are 1.6–2.4× faster than reifying one. A `Node3` carries
-both breadth axes and two hulls, so every walk has about twice the memory to go through of
-its 2D counterpart.
+Over an `Arena3` the reused mirror now matches the recursion, where in 2D it stays behind:
+the copy in and out costs what the cache-line layout saves, and the sweeps need no stack.
+Over arrays there is no tree to build at all, and the sweeps are 2.2–4.6× faster than
+reifying one. A `Node3` carries both breadth axes and two hulls, so every walk has about
+twice the memory to go through of its 2D counterpart.
 
 ## Benchmarks
 

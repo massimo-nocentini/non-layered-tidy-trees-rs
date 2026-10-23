@@ -11,7 +11,10 @@ python3 prototype/t_overlap.py       # the prototype's own overlap and margin ch
 python3 prototype/t_lin.py           # its contour steps per node on adversarial shapes
 ```
 
-`xcheck.py` hands the prototype's choice of family axis to the Rust side node by node, so
-the two lay out exactly the same problem; `examples/space_xcheck.rs` is the Rust half.
-`t_lin.py` also measures the `trial` rule, which tries both axes at every node and which
-the crate does not implement.
+`xcheck.py` runs two passes. The first hands the prototype's choice of family axis to the
+Rust side node by node, so the two lay out exactly the same problem. The second hands it
+no axes at all: the prototype picks them with its `trial` rule, scored by the longer side
+of the footprint, and `layout3` with `AxisRule::Compact`, so the two have to make the same
+choices as well. `examples/space_xcheck.rs` is the Rust half. `t_lin.py` also measures the
+`trial` rule with its boxes built for the rejected axis too, which is the quadratic variant
+the crate avoids.

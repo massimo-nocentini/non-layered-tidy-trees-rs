@@ -40,19 +40,34 @@ fn tree(
 }
 
 /// The breadth axes of a depth axis, and the rules that can go with it.
-fn frame(depth: Axis) -> ([Axis; 2], [AxisRule; 3]) {
+fn frame(depth: Axis) -> ([Axis; 2], [AxisRule; 4]) {
     match depth {
         Axis::X => (
             [Axis::Y, Axis::Z],
-            [AxisRule::AllY, AxisRule::AllZ, AxisRule::Alternate],
+            [
+                AxisRule::AllY,
+                AxisRule::AllZ,
+                AxisRule::Alternate,
+                AxisRule::Compact,
+            ],
         ),
         Axis::Y => (
             [Axis::X, Axis::Z],
-            [AxisRule::AllX, AxisRule::AllZ, AxisRule::Alternate],
+            [
+                AxisRule::AllX,
+                AxisRule::AllZ,
+                AxisRule::Alternate,
+                AxisRule::Compact,
+            ],
         ),
         Axis::Z => (
             [Axis::X, Axis::Y],
-            [AxisRule::AllX, AxisRule::AllY, AxisRule::Alternate],
+            [
+                AxisRule::AllX,
+                AxisRule::AllY,
+                AxisRule::Alternate,
+                AxisRule::Compact,
+            ],
         ),
     }
 }
@@ -153,19 +168,21 @@ fn a_depth_axis_is_a_renaming() {
         (
             Axis::X,
             (Axis::X, Axis::Y),
-            [
+            vec![
                 (AxisRule::AllX, AxisRule::AllY),
                 (AxisRule::AllZ, AxisRule::AllZ),
                 (AxisRule::Alternate, AxisRule::Alternate),
+                (AxisRule::Compact, AxisRule::Compact),
             ],
         ),
         (
             Axis::Z,
             (Axis::Y, Axis::Z),
-            [
+            vec![
                 (AxisRule::AllX, AxisRule::AllX),
                 (AxisRule::AllZ, AxisRule::AllY),
                 (AxisRule::Alternate, AxisRule::Alternate),
+                (AxisRule::Compact, AxisRule::Compact),
             ],
         ),
     ] {

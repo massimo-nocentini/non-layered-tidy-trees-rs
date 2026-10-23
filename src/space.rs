@@ -118,16 +118,17 @@ impl Frame {
         self.breadth.iter().position(|&b| b == ax.index())
     }
 
-    /// The breadth axis a family is laid out along, for a node of children.
+    /// The breadth axis a family is laid out along, for a node of children; `None` when
+    /// the layout is to try both, as [`AxisRule::Compact`] does.
     ///
     /// # Panics
     ///
     /// If the axis asked for, by the node or by the rule, is the depth axis.
-    pub(crate) fn family(self, axis: Option<Axis>, rule: AxisRule, height: usize) -> usize {
-        let ax = axis.unwrap_or_else(|| rule.pick(height, self));
-        self.slot(ax).unwrap_or_else(|| {
+    pub(crate) fn family(self, axis: Option<Axis>, rule: AxisRule, height: usize) -> Option<usize> {
+        let ax = axis.or_else(|| rule.pick(height, self))?;
+        Some(self.slot(ax).unwrap_or_else(|| {
             panic!("a family cannot be laid out along {ax:?}, which is the depth axis")
-        })
+        }))
     }
 }
 
@@ -152,15 +153,36 @@ pub enum AxisRule {
     /// isomorphic subtrees get the same axes and come out congruent; a rule by level would
     /// not.
     Alternate,
+    /// At every node, whichever of the two breadth axes gives the subtree the smaller
+    /// footprint, measured by its longer side; the first breadth axis on a tie.
+    ///
+    /// The choice is greedy, and it is not a better default than [`AxisRule::Alternate`]:
+    /// it squares every subtree, and a wide family then lines the squares up into a strip,
+    /// where alternating axes stack elongated subtrees back into a square. Over the trees
+    /// of `treegen::bench_tree`, 30 per cell, the median longer side under `Compact` is
+    /// 0.75-0.89 of `Alternate`'s for at most 2 children a node at every size from 100 to
+    /// 100 000 nodes, but 1.22 at 100 000 nodes for 4 and 1.94 for 8. Use it for narrow
+    /// trees.
+    ///
+    /// The layout lays each family out along both axes, keeps the better and undoes the
+    /// other, so the first walk does up to three times its work and stays linear: a trial
+    /// only steps past contour items down to the second deepest child, which the hull of
+    /// the axis that is kept then hides. The choice depends on the subtree alone, so
+    /// isomorphic subtrees still come out congruent. [`Callbacks3::contour_pairs`] sees
+    /// the pairs of every trial.
+    Compact,
 }
 
 impl AxisRule {
-    fn pick(self, height: usize, frame: Frame) -> Axis {
+    fn pick(self, height: usize, frame: Frame) -> Option<Axis> {
         match self {
-            AxisRule::AllX => Axis::X,
-            AxisRule::AllY => Axis::Y,
-            AxisRule::AllZ => Axis::Z,
-            AxisRule::Alternate => Axis::of(frame.breadth[if height % 2 == 1 { 0 } else { 1 }]),
+            AxisRule::AllX => Some(Axis::X),
+            AxisRule::AllY => Some(Axis::Y),
+            AxisRule::AllZ => Some(Axis::Z),
+            AxisRule::Alternate => {
+                Some(Axis::of(frame.breadth[if height % 2 == 1 { 0 } else { 1 }]))
+            }
+            AxisRule::Compact => None,
         }
     }
 }
@@ -245,6 +267,8 @@ pub struct Node3 {
     /// The resolved family axis, as a breadth axis of the frame and as a world axis.
     fam: usize,
     family: Axis,
+    /// Whether the family axis is left to a trial of both.
+    trial: bool,
 
     // Everything below is in the frame of the layout: per breadth axis, indexed 0 and 1,
     // or along the depth axis. The world fields are only written by the second walk.
@@ -295,6 +319,7 @@ impl Node3 {
             children: Vec::new(),
             fam: 0,
             family: Axis::X,
+            trial: false,
             ext: [0.0; 2],
             dext: 0.0,
             top: 0.0,
@@ -649,10 +674,21 @@ fn move_subtree(a: &mut Arena3, t: NodeId, i: usize, si: usize, dist: f64, ax: u
     }
 }
 
-fn set_left_thread(a: &mut Arena3, t: NodeId, i: usize, cl: Item, modsumcl: f64, ax: usize) {
+fn set_left_thread(
+    a: &mut Arena3,
+    t: NodeId,
+    i: usize,
+    cl: Item,
+    modsumcl: f64,
+    ax: usize,
+    log: Option<&mut Vec<Saved>>,
+) {
     let c0 = a.child(t, 0);
     let ci = a.child(t, i);
     let li = a[c0].el[ax].expect("the leftmost child has an extreme left item");
+    if let Some(log) = log {
+        log.push(a.save(li));
+    }
 
     // Change mod so that the sum of modifier after following thread is correct.
     let diff = (modsumcl - a.item_modifier(cl, ax)) - a[c0].msel[ax];
@@ -666,10 +702,21 @@ fn set_left_thread(a: &mut Arena3, t: NodeId, i: usize, cl: Item, modsumcl: f64,
 }
 
 /// Symmetrical to [`set_left_thread`].
-fn set_right_thread(a: &mut Arena3, t: NodeId, i: usize, sr: Item, modsumsr: f64, ax: usize) {
+fn set_right_thread(
+    a: &mut Arena3,
+    t: NodeId,
+    i: usize,
+    sr: Item,
+    modsumsr: f64,
+    ax: usize,
+    log: Option<&mut Vec<Saved>>,
+) {
     let ci = a.child(t, i);
     let cp = a.child(t, i - 1);
     let ri = a[ci].er[ax].expect("the i-th child has an extreme right item");
+    if let Some(log) = log {
+        log.push(a.save(ri));
+    }
     let diff = (modsumsr - a.item_modifier(sr, ax)) - a[ci].mser[ax];
 
     a.set_thread(ri, Side::Right, ax, sr);
@@ -680,6 +727,7 @@ fn set_right_thread(a: &mut Arena3, t: NodeId, i: usize, sr: Item, modsumsr: f64
 }
 
 /// [`crate::layout`]'s `separate`, along `ax` and over items rather than nodes.
+#[allow(clippy::too_many_arguments)]
 fn separate(
     a: &mut Arena3,
     cb: &mut Callbacks3,
@@ -688,6 +736,7 @@ fn separate(
     i: usize,
     chain: &[ChainLink],
     ax: usize,
+    log: Option<&mut Vec<Saved>>,
 ) {
     let prev = a.child(t, i - 1);
     let mut sr = Some(Item::Node(prev));
@@ -742,8 +791,8 @@ fn separate(
     }
 
     match (sr, cl) {
-        (None, Some(c)) => set_left_thread(a, t, i, c, mscl, ax),
-        (Some(s), None) => set_right_thread(a, t, i, s, mssr, ax),
+        (None, Some(c)) => set_left_thread(a, t, i, c, mscl, ax, log),
+        (Some(s), None) => set_right_thread(a, t, i, s, mssr, ax, log),
         _ => {}
     }
 }
@@ -879,25 +928,47 @@ fn first_walk(a: &mut Arena3, cb: &mut Callbacks3, frame: Frame, t: NodeId) {
         return;
     }
 
-    let ax = a[t].fam;
+    // The children first: separating one never touches the subtree of the next.
+    for i in 0..k {
+        let c = a.child(t, i);
+        first_walk(a, cb, frame, c);
+    }
+
+    if a[t].trial {
+        compact(a, cb, frame, t);
+    } else {
+        let ax = a[t].fam;
+        family(a, cb, frame, t, ax, None);
+    }
+
+    finish(a, t);
+}
+
+/// Lays the children of `t` out along `ax`, with the 2D first walk verbatim, and centres
+/// them under `t` along the other axis; `log` records what the thread setters overwrite
+/// outside the children themselves.
+fn family(
+    a: &mut Arena3,
+    cb: &mut Callbacks3,
+    frame: Frame,
+    t: NodeId,
+    ax: usize,
+    mut log: Option<&mut Vec<Saved>>,
+) {
+    let k = a.nchildren(t);
     let b = 1 - ax;
 
-    // Along the family axis: the 2D first walk, verbatim.
     let c0 = a.child(t, 0);
-    first_walk(a, cb, frame, c0);
-
     let mut chain = Vec::new();
     let el = a[c0].el[ax].expect("the first walk sets the extreme left item");
     update_chain(&mut chain, a.item_bottom(el), 0);
 
     for i in 1..k {
         let ci = a.child(t, i);
-        first_walk(a, cb, frame, ci);
-
         let er = a[ci].er[ax].expect("the first walk sets the extreme right item");
         let min = a.item_bottom(er);
 
-        separate(a, cb, frame, t, i, &chain, ax);
+        separate(a, cb, frame, t, i, &chain, ax, log.as_deref_mut());
 
         update_chain(&mut chain, min, i);
     }
@@ -920,6 +991,178 @@ fn first_walk(a: &mut Arena3, cb: &mut Callbacks3, frame: Frame, t: NodeId) {
         c.msel[b] += off;
         c.mser[b] += off;
     }
+}
+
+/// What a trial changes in a child of the node it is run at.
+#[derive(Debug, Clone, Copy)]
+struct Kid {
+    modifier: [f64; 2],
+    msel: [f64; 2],
+    mser: [f64; 2],
+    el: [Option<Item>; 2],
+    er: [Option<Item>; 2],
+    shift: f64,
+    change: f64,
+}
+
+/// What a thread setter changes in the item it threads, which may lie anywhere below.
+#[derive(Debug, Clone, Copy)]
+enum Saved {
+    Node {
+        id: NodeId,
+        tl: [Option<Item>; 2],
+        tr: [Option<Item>; 2],
+        prelim: [f64; 2],
+        modifier: [f64; 2],
+    },
+    Hull(NodeId, Side, Hull),
+}
+
+impl Arena3 {
+    fn save(&self, it: Item) -> Saved {
+        match it {
+            Item::Node(id) => {
+                let n = &self[id];
+                Saved::Node {
+                    id,
+                    tl: n.tl,
+                    tr: n.tr,
+                    prelim: n.prelim,
+                    modifier: n.modifier,
+                }
+            }
+            Item::Hull(id, side) => Saved::Hull(id, side, *self.hull(id, side)),
+        }
+    }
+
+    fn restore(&mut self, s: Saved) {
+        match s {
+            Saved::Node {
+                id,
+                tl,
+                tr,
+                prelim,
+                modifier,
+            } => {
+                let n = &mut self[id];
+                n.tl = tl;
+                n.tr = tr;
+                n.prelim = prelim;
+                n.modifier = modifier;
+            }
+            Saved::Hull(id, side, hull) => *self.hull_mut(id, side) = hull,
+        }
+    }
+}
+
+/// [`AxisRule::Compact`] at `t`: the family along both axes, the better kept.
+fn compact(a: &mut Arena3, cb: &mut Callbacks3, frame: Frame, t: NodeId) {
+    let kids: Vec<Kid> = a[t]
+        .children
+        .iter()
+        .map(|&c| {
+            let n = &a[c];
+            Kid {
+                modifier: n.modifier,
+                msel: n.msel,
+                mser: n.mser,
+                el: n.el,
+                er: n.er,
+                shift: n.shift,
+                change: n.change,
+            }
+        })
+        .collect();
+    let prelim = a[t].prelim;
+    let mut log = Vec::new();
+
+    // Undoes a trial: the threaded items first, latest first, then the children, whose
+    // saved state predates the whole trial.
+    let undo = |a: &mut Arena3, log: &mut Vec<Saved>| {
+        while let Some(s) = log.pop() {
+            a.restore(s);
+        }
+        for (i, kid) in kids.iter().enumerate() {
+            let c = a.child(t, i);
+            let n = &mut a[c];
+            n.modifier = kid.modifier;
+            n.msel = kid.msel;
+            n.mser = kid.mser;
+            n.el = kid.el;
+            n.er = kid.er;
+            n.shift = kid.shift;
+            n.change = kid.change;
+        }
+        a[t].prelim = prelim;
+    };
+
+    family(a, cb, frame, t, 0, Some(&mut log));
+    let first = longest(&extent(a, t, 0));
+    undo(a, &mut log);
+
+    family(a, cb, frame, t, 1, Some(&mut log));
+    let second = longest(&extent(a, t, 1));
+
+    let ax = if first <= second {
+        undo(a, &mut log);
+        family(a, cb, frame, t, 0, None);
+        0
+    } else {
+        1
+    };
+
+    let n = &mut a[t];
+    n.fam = ax;
+    n.family = Axis::of(frame.breadth[ax]);
+}
+
+/// The longer side of a footprint.
+pub(crate) fn longest(bbox: &[f64; 4]) -> f64 {
+    let (u, v) = (bbox[1] - bbox[0], bbox[3] - bbox[2]);
+    if u > v {
+        u
+    } else {
+        v
+    }
+}
+
+/// The extent of the subtree of `t` once its family is laid out along `ax`, with the
+/// spacing the second walk will add to the middle children replayed in the same order
+/// `add_child_spacing` applies it.
+fn extent(a: &Arena3, t: NodeId, ax: usize) -> [f64; 4] {
+    let n = &a[t];
+    let mut bbox = [0.0, n.ext[0] + n.margin, 0.0, n.ext[1] + n.margin];
+    let origin = n.prelim;
+    let (mut d, mut modsumdelta) = (0.0, 0.0);
+    for i in 0..a.nchildren(t) {
+        let c = &a[a.child(t, i)];
+        d += c.shift;
+        modsumdelta += d + c.change;
+        let mut rel = [
+            c.prelim[0] + c.modifier[0] - origin[0],
+            c.prelim[1] + c.modifier[1] - origin[1],
+        ];
+        rel[ax] += modsumdelta;
+        for q in 0..2 {
+            let (lo, hi) = (rel[q] + c.bbox[2 * q], rel[q] + c.bbox[2 * q + 1]);
+            if lo < bbox[2 * q] {
+                bbox[2 * q] = lo;
+            }
+            if hi > bbox[2 * q + 1] {
+                bbox[2 * q + 1] = hi;
+            }
+        }
+    }
+    bbox
+}
+
+/// The contours of `t` along its cross axis, its extent and its depth, once its family is
+/// laid out for good.
+fn finish(a: &mut Arena3, t: NodeId) {
+    let k = a.nchildren(t);
+    let ax = a[t].fam;
+    let b = 1 - ax;
+    let c0 = a.child(t, 0);
 
     let mut d1 = f64::NEG_INFINITY;
     let mut j1 = 0;
@@ -948,32 +1191,7 @@ fn first_walk(a: &mut Arena3, cb: &mut Callbacks3, frame: Frame, t: NodeId) {
         hull_contour(a, t, b, Side::Right, j1, d2);
     }
 
-    // The subtree's extent, with the spacing the second walk will add to the middle
-    // children replayed in the same order `add_child_spacing` applies it.
-    let n = &a[t];
-    let mut bbox = [0.0, n.ext[0] + n.margin, 0.0, n.ext[1] + n.margin];
-    let origin = n.prelim;
-    let (mut d, mut modsumdelta) = (0.0, 0.0);
-    for i in 0..k {
-        let c = &a[a.child(t, i)];
-        d += c.shift;
-        modsumdelta += d + c.change;
-        let mut rel = [
-            c.prelim[0] + c.modifier[0] - origin[0],
-            c.prelim[1] + c.modifier[1] - origin[1],
-        ];
-        rel[ax] += modsumdelta;
-        for q in 0..2 {
-            let (lo, hi) = (rel[q] + c.bbox[2 * q], rel[q] + c.bbox[2 * q + 1]);
-            if lo < bbox[2 * q] {
-                bbox[2 * q] = lo;
-            }
-            if hi > bbox[2 * q + 1] {
-                bbox[2 * q + 1] = hi;
-            }
-        }
-    }
-
+    let bbox = extent(a, t, ax);
     let n = &mut a[t];
     let bottom = n.bot();
     n.bbox = bbox;
@@ -1083,11 +1301,13 @@ fn setup_walk(
     }
 
     let n = &mut a[t];
-    n.fam = if n.children.is_empty() {
-        0
+    let fam = if n.children.is_empty() {
+        Some(0)
     } else {
         frame.family(n.axis, input.rule, height)
     };
+    n.trial = fam.is_none();
+    n.fam = fam.unwrap_or(0);
     n.family = Axis::of(frame.breadth[n.fam]);
 
     height
@@ -1235,7 +1455,9 @@ pub(crate) fn heights(n: usize, children: &[usize], off: &[usize], rooti: usize)
 /// Every node gets an invisible gap node above it, with no margin: node `i` is `nodes[i]`
 /// and its gap node `nodes[i + n]`, so the root of the tree is `nodes[rooti - 1 + n]`. The
 /// family axes are resolved here, by the rule and the heights of the tree without its gap
-/// nodes, and set on every node; a gap node takes the axis of the node below it.
+/// nodes, and set on every node of children, except under [`AxisRule::Compact`], which
+/// leaves them to the layout. A gap node is laid out along the first breadth axis: with one
+/// child, either axis centres it the same way.
 ///
 /// # Panics
 ///
@@ -1285,14 +1507,14 @@ pub fn reify3(
             arena.push_child(nodes[i], nodes[c - 1 + n]);
         }
 
-        let fam = if children[i] == 0 {
-            0
+        arena[nodes[i]].axis = if children[i] == 0 {
+            None
         } else {
-            frame.family(None, input.rule, height[i])
+            frame
+                .family(None, input.rule, height[i])
+                .map(|fam| Axis::of(frame.breadth[fam]))
         };
-        let ax = Some(Axis::of(frame.breadth[fam]));
-        arena[nodes[i]].axis = ax;
-        arena[nodes[i + n]].axis = ax;
+        arena[nodes[i + n]].axis = Some(Axis::of(frame.breadth[0]));
     }
 
     (arena, nodes)

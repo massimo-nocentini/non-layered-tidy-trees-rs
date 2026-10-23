@@ -16,7 +16,12 @@ use non_layered_tidy_trees::space::{
 use non_layered_tidy_trees::treegen::{self, Regime, Rng, REGIMES};
 use non_layered_tidy_trees::{layout, Arena, LayoutInput, NodeId};
 
-const RULES: [AxisRule; 3] = [AxisRule::AllX, AxisRule::AllZ, AxisRule::Alternate];
+const RULES: [AxisRule; 4] = [
+    AxisRule::AllX,
+    AxisRule::AllZ,
+    AxisRule::Alternate,
+    AxisRule::Compact,
+];
 
 fn close_enough(a: f64, b: f64) -> bool {
     (a - b) < 1e-9 && (b - a) < 1e-9
@@ -554,13 +559,21 @@ fn linearity_on_a_large_stack() {
         eprintln!("  {name:<32} {:.2} {:.2} {:.2}", r[0], r[1], r[2]);
     }
 
+    // `Compact` runs a family up to three times: both trials, then the better one again.
+    let bound = |name: &str| {
+        if name.starts_with("Compact") {
+            12.0
+        } else {
+            4.0
+        }
+    };
     let over: Vec<_> = worst
         .iter()
-        .filter(|(_, r)| r.iter().any(|&x| x > 4.0))
+        .filter(|(name, r)| r.iter().any(|&x| x > bound(name)))
         .collect();
     assert!(
         over.is_empty(),
-        "more than 4 contour pairs per node: {over:?}"
+        "more contour pairs per node than one pass per family (three under `Compact`) allows: {over:?}"
     );
 
     // and not growing with n either

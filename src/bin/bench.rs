@@ -14,7 +14,8 @@
 //! A second table times the 3D layout of `space` over the same trees, lifted with a `d` per
 //! box. Its `-x` rows lay every family along the 2D breadth axis and print the 2D checksum,
 //! which they have to share with the 2D rows; the other rows alternate the axes by height
-//! and print a checksum over all three coordinates. `vert` 0 is the depth along `x`.
+//! and print a checksum over all three coordinates, the `-compact` and `-c` rows under
+//! `AxisRule::Compact`. `vert` 0 is the depth along `x`.
 
 use std::env;
 use std::time::Instant;
@@ -202,6 +203,7 @@ type Runner3 = Box<dyn FnMut(&mut Arena3, &LayoutInput3)>;
 fn impls3() -> Vec<(&'static str, Runner3, bool)> {
     let mut engine = Engine3::new();
     let mut engine_x = Engine3::new();
+    let mut engine_c = Engine3::new();
     let along = |i: &LayoutInput3| LayoutInput3 {
         rule: if i.depth == Axis::Y {
             AxisRule::AllX
@@ -222,6 +224,32 @@ fn impls3() -> Vec<(&'static str, Runner3, bool)> {
             "rust-3d-x",
             Box::new(move |a: &mut Arena3, i: &LayoutInput3| layout3(a, &along(i))),
             true,
+        ),
+        (
+            "rust-3d-compact",
+            Box::new(|a: &mut Arena3, i: &LayoutInput3| {
+                layout3(
+                    a,
+                    &LayoutInput3 {
+                        rule: AxisRule::Compact,
+                        ..*i
+                    },
+                )
+            }),
+            false,
+        ),
+        (
+            "rust-3d-flat-r-c",
+            Box::new(move |a: &mut Arena3, i: &LayoutInput3| {
+                engine_c.layout(
+                    a,
+                    &LayoutInput3 {
+                        rule: AxisRule::Compact,
+                        ..*i
+                    },
+                )
+            }),
+            false,
         ),
         (
             "rust-3d-flat-r-x",
