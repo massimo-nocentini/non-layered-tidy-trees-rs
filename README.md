@@ -114,7 +114,7 @@ assertions.
 | `test/depth.c` | `tests/depth.rs` | a chain of 10 000 levels; the walks run on a thread with a 64 MiB stack, since `cargo test` gives each test 2 MiB |
 | — | `tests/flat.rs` | the sweeps against the recursion, bit for bit: 1 152 trees with their bookkeeping, a reused `Engine`, a 300 000-level chain, and `layout_api_flat` against `layout_api` |
 | `overlap --dump` | `src/bin/dump.rs` | the differential oracle below |
-| — | `tests/space.rs`, `tests/space_overlap.rs`, `tests/space_flat.rs` | the 3D layout of [`space`](#three-dimensions) |
+| — | `tests/space.rs`, `tests/space_overlap.rs`, `tests/space_flat.rs`, `tests/space_payment_graph.rs` | the 3D layout of [`space`](#three-dimensions) |
 | — | `src/lib.rs` unit tests | `max_bottom` / `max_bottom_between`, which the C suite does not cover; the expected values are the ones the C build prints |
 
 `NLTT_TRIALS` sets the trees per shape (default 300, the C default) and `NLTT_DEPTH` the
@@ -250,8 +250,8 @@ side, `Compact` over `Alternate`, 30 `bench_tree`s a cell:
 
 It is worth it for narrow trees, and for small ones, not as a rule.
 
-What it keeps, and what pins it down in `tests/space.rs`, `tests/space_overlap.rs` and
-`tests/space_flat.rs`:
+What it keeps, and what pins it down in `tests/space.rs`, `tests/space_overlap.rs`,
+`tests/space_flat.rs` and `tests/space_payment_graph.rs`:
 
 | | |
 |---|---|
@@ -264,11 +264,18 @@ What it keeps, and what pins it down in `tests/space.rs`, `tests/space_overlap.r
 | isomorphic subtrees drawn alike | two copies of a subtree around a third |
 | normalization, repeatability, `centered` as one rigid translation | as in `tests/properties.rs` |
 | linear | 1.0–1.9 contour pairs per node from 2 000 to 32 000 nodes, on random, binary and spine shapes; 2.5–4.3 under `Compact` |
+| real data | trees made from the Bitcoin Payment Graph in [`tests/data`](tests/data/README.md), the whole of the first 10 000 transactions among them: no overlap and the flat engine bit for bit under every rule, `AllX` against `layout`, every box starting where its parent's ends, and the 9 419 roots of the first 10 000 transactions packed into a square |
 | the exact-arithmetic model of the design | `python3 prototype/xcheck.py`: 2 000 random trees within 1e-9 of `prototype/proto.py` with its axes given, and 2 000 with `Compact` choosing them against the prototype's own trial rule; see [`prototype/`](prototype/README.md) |
 
 The price is compactness: siblings are separated along their family's axis even where they
 are already apart along the other one, and a hull keeps a subtree's full extent at every
 depth it covers.
+
+[`viz/tidy3d.html`](viz/README.md) shows those trees, and the random one of the design
+review, laid out by `layout3` under each rule. The Payment Graph ones take an output's
+lifetime in blocks as the height of its box, which makes the non-layered depth axis exact
+block height, and `√BTC` as its side. `viz/build.sh` rebuilds the fixtures, the layouts and
+the page from a checkout of utxo2webgraph-rs.
 
 `make bench` prints a second table for the 3D layout over the same trees, lifted with a `d`
 per box. Its `-x` rows lay every family along the 2D breadth axis and carry the 2D checksum,

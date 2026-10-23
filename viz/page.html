@@ -1,0 +1,611 @@
+<title>Tidy Trees in 3D</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spline+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one column; the 3D view is the page, controls above it, legend and figures below. */
+:root {
+  --bg: #f4f6f9;
+  --panel: #ffffff;
+  --fg: #18202b;
+  --muted: #5b6676;
+  --line: #d8dee7;
+  --x: #2f6fdb;
+  --z: #d9861c;
+  --root: #6b7686;
+  --edge: #8a96a8;
+  --cross: #c2367a;
+  --mined: #c79a12;
+  --moved: #2a9d8f;
+  --font-body: "Spline Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-data: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1218; --panel: #151b24; --fg: #e5eaf1; --muted: #98a3b3; --line: #273140;
+    --x: #5b92f0; --z: #f0a43d; --root: #8e99a9; --edge: #5d6a7d; --cross: #ef6ba8;
+    --mined: #e8c34a; --moved: #4cc3b4; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1218; --panel: #151b24; --fg: #e5eaf1; --muted: #98a3b3; --line: #273140;
+  --x: #5b92f0; --z: #f0a43d; --root: #8e99a9; --edge: #5d6a7d; --cross: #ef6ba8;
+  --mined: #e8c34a; --moved: #4cc3b4; color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.5; }
+.wrap {
+  max-width: 1120px; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 28px 40px;
+  display: grid; gap: 18px;
+}
+header { display: grid; gap: 6px; }
+h1 { font-size: 1.75rem; font-weight: 600; letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
+.lede { margin: 0; color: var(--muted); max-width: 72ch; }
+.controls { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; }
+.group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.group[hidden] { display: none !important; }
+.label { font-family: var(--font-data); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+.seg button {
+  font: inherit; font-size: 0.875rem; border: 0; background: transparent; color: var(--fg);
+  padding: 7px 12px; cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+.seg button:focus-visible, input[type="range"]:focus-visible { outline: 2px solid var(--x); outline-offset: -2px; }
+input[type="range"] { accent-color: var(--x); width: 140px; }
+.case-blurb { margin: 0; max-width: 78ch; }
+.stage {
+  position: relative; width: 100%; aspect-ratio: 16 / 10; min-height: 360px; max-width: 100%;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+}
+.stage canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.hint { position: absolute; left: 12px; bottom: 10px; font-family: var(--font-data); font-size: 0.72rem; color: var(--muted); pointer-events: none; }
+.ticks { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.tick { position: absolute; font-family: var(--font-data); font-size: 0.7rem; color: var(--muted); transform: translate(-100%, -50%); padding-right: 6px; white-space: nowrap; }
+.tip {
+  position: absolute; pointer-events: none; background: var(--panel); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 0.8rem;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.12); max-width: 260px; line-height: 1.4;
+}
+.tip b { font-family: var(--font-data); font-weight: 500; }
+.tip .k { color: var(--muted); }
+.below { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px 32px; }
+.legend { display: grid; gap: 8px; align-content: start; }
+.key { display: flex; gap: 10px; align-items: baseline; }
+.sw { width: 12px; height: 12px; border-radius: 3px; flex: none; transform: translateY(1px); }
+.sw.line { height: 0; border-top: 1px solid var(--edge); border-radius: 0; width: 16px; transform: translateY(-3px); }
+.sw.dash { height: 0; border-top: 2px dashed var(--cross); border-radius: 0; width: 16px; transform: translateY(-3px); }
+.figs { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; align-content: start; font-variant-numeric: tabular-nums; margin: 0; }
+.figs dt { color: var(--muted); }
+.figs dd { margin: 0; font-family: var(--font-data); font-size: 0.875rem; }
+.note { color: var(--muted); font-size: 0.85rem; margin: 0; max-width: 78ch; }
+code { font-family: var(--font-data); font-size: 0.85em; }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Tidy Trees in 3D</h1>
+    <p class="lede">Each family of siblings is separated along x or z by the unchanged 2D contour walk, and centred under its parent along the other axis. Every layout here is computed by <code>space::layout3</code> in the crate, checked pair by pair for overlapping boxes, and reproduced bit for bit by the flat engine.</p>
+  </header>
+
+  <div class="controls">
+    <div class="group">
+      <span class="label" id="case-l">Test case</span>
+      <div class="seg" role="group" aria-labelledby="case-l" id="cases"></div>
+    </div>
+    <div class="group">
+      <span class="label" id="lay-l">Rule</span>
+      <div class="seg" role="group" aria-labelledby="lay-l">
+        <button id="lay-alternate" type="button" aria-pressed="true">Alternate</button>
+        <button id="lay-compact" type="button" aria-pressed="false">Compact</button>
+        <button id="lay-allx" type="button" aria-pressed="false">All along x (2D)</button>
+      </div>
+    </div>
+    <div class="group">
+      <span class="label" id="view-l">View</span>
+      <div class="seg" role="group" aria-labelledby="view-l">
+        <button id="view-orbit" type="button" aria-pressed="true">Perspective</button>
+        <button id="view-top" type="button" aria-pressed="false">Top</button>
+        <button id="view-front" type="button" aria-pressed="false">Front</button>
+      </div>
+    </div>
+    <div class="group" id="colour-g">
+      <span class="label" id="col-l">Colour</span>
+      <div class="seg" role="group" aria-labelledby="col-l">
+        <button id="col-axis" type="button" aria-pressed="true">Family axis</button>
+        <button id="col-kind" type="button" aria-pressed="false">Output kind</button>
+      </div>
+    </div>
+    <div class="group" id="scale-g">
+      <label class="label" for="scale">Time scale</label>
+      <input id="scale" type="range" min="-3" max="2" step="0.05" value="0">
+    </div>
+  </div>
+
+  <p class="case-blurb" id="blurb"></p>
+
+  <div class="stage" id="stage">
+    <div class="ticks" id="ticks"></div>
+    <div class="tip" id="tip" hidden></div>
+    <span class="hint">Drag to rotate · scroll or pinch to zoom · point at a box for its details</span>
+  </div>
+
+  <div class="below">
+    <div class="legend" id="legend"></div>
+    <dl class="figs" id="figs"></dl>
+  </div>
+
+  <p class="note" id="note"></p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+// One entry per test case. nodes: [w, h, d, parent, ...] followed, for the Payment Graph, by
+// [tx, output, btc, created, spent or -1, coinbase] for an output or [-1, first block, last
+// block] for a grouping node. y: the depth coordinate, which every rule shares. layouts:
+// rule -> flat [x, z, family axis (0 x, 1 z, -1 leaf)] per node.
+const CASES = __DATA__;
+
+const NOTES = {
+  tenk: "Payment Graph of the first 10,000 transactions (transactions numbered in blockchain order, as in the dataset): one node per output, an arc from every input of a transaction to each of its outputs. Read backwards, the 9,419 outputs still unspent at block 9,909 are the roots of 9,419 trees, and 32 arcs reach an output a second time; the tree keeps its first parent and draws those arcs dashed. An invisible grouping tree joins the roots into one: four levels of at most ten, in chronological order, with no size, sitting on the top plane, and with their families fixed by level, x just above the outputs and then z, x, z. That packs the roots into a square instead of a row 78,000 units long, which is what All along x shows. Everything below the roots is laid out by the rule chosen. Box height is the output's lifetime in blocks and the footprint side the square root of its value in BTC.",
+  funnel: "Payment Graph of the first 32,485 blocks (2009–2010; transactions numbered in blockchain order, as in the dataset), one node per transaction output, an arc from every input of a transaction to each of its outputs. Read backwards from its one sink, this component is a DAG: six outputs reach the sink through two outputs of the same transaction. The tree keeps the first parent of each and draws the other arcs dashed. Box height is the output's lifetime in blocks, from the transaction that created it to the one that spent it, so the non-layered depth axis is exact block height: a child's box starts where its parent's ends. The footprint side is the square root of the value in BTC, so area is proportional to value.",
+  first: "The same graph, read forwards from the coinbase output of block 9. Box height is again the lifetime in blocks; an output never spent in the data runs to block 32,485, where the data ends. One output is reached twice, through the two inputs of the transaction that created it; the second arc is dashed.",
+  random: "The tree of the first picture, now laid out by the crate itself. Its Alternate rule starts on x at the parents of leaves; the prototype the first picture came from started on z, so the drawing differs from it.",
+};
+
+const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const stage = document.getElementById("stage");
+const ticksEl = document.getElementById("ticks");
+const tip = document.getElementById("tip");
+const fmt = new Intl.NumberFormat("en-US");
+const btcFmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 8 });
+const RULES = ["alternate", "compact", "allx"];
+
+function token(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+stage.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, 1.6, 0.5, 200000);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.62));
+const sun = new THREE.DirectionalLight(0xffffff, 0.55);
+sun.position.set(0.6, 1, 0.8);
+scene.add(sun);
+
+const boxMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+const outline = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.3 });
+const linkMat = new THREE.LineBasicMaterial();
+const groupMat = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.45 });
+const crossMat = new THREE.LineDashedMaterial({ dashSize: 3, gapSize: 2 });
+const unitBox = new THREE.BoxGeometry(1, 1, 1);
+const EDGE = new THREE.EdgesGeometry(unitBox).attributes.position.array; // 24 vertices
+const palette = {};
+
+const state = { c: 0, rule: "alternate", view: "orbit", colour: "axis", scale: 1 };
+let group = null, mesh = null, real = [], slot = null;
+let edgeGeo, linkGeo, groupGeo, crossGeo, crossLines, axisLine;
+let linkPairs = [], groupPairs = [];
+let from = null, to = null, P = null, t0 = 0, dur = 0, dirty = true;
+
+const cur = () => CASES[state.c];
+const isPG = () => cur().time !== null;
+const isGroup = n => n.length > 4 && n[4] === -1;
+
+const extents = new Map();
+function extentOf(c, rule) {
+  const key = c.key + ":" + rule;
+  if (extents.has(key)) return extents.get(key);
+  const L = c.layouts[rule];
+  let x1 = 0, z1 = 0, y1 = 0;
+  c.nodes.forEach((n, i) => {
+    x1 = Math.max(x1, L[3 * i] + n[0]);
+    z1 = Math.max(z1, L[3 * i + 1] + n[2]);
+    y1 = Math.max(y1, c.y[i] + n[1]);
+  });
+  const e = { x: x1, z: z1, y: y1 };
+  extents.set(key, e);
+  return e;
+}
+
+// The scale that makes the drawing about as tall as it is wide, for the Payment Graph.
+function baseScale(c) {
+  if (!c.time) return 1;
+  const e = extentOf(c, "alternate");
+  return (1.1 * Math.max(e.x, e.z)) / e.y;
+}
+
+// Scene positions of every box centre for a rule; y grows downward in the layout.
+function centres(rule) {
+  const c = cur(), L = c.layouts[rule], s = state.scale, e = extentOf(c, rule);
+  const out = new Float32Array(c.nodes.length * 3);
+  c.nodes.forEach((n, i) => {
+    out[3 * i] = L[3 * i] + n[0] / 2 - e.x / 2;
+    out[3 * i + 1] = -(c.y[i] + n[1] / 2) * s + (e.y * s) / 2;
+    out[3 * i + 2] = L[3 * i + 1] + n[2] / 2 - e.z / 2;
+  });
+  return out;
+}
+
+function lineGeometry(count) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(count * 6), 3));
+  return g;
+}
+
+function build() {
+  if (group) {
+    scene.remove(group);
+    group.traverse(o => { if (o.geometry && o.geometry !== unitBox) o.geometry.dispose(); });
+    if (mesh) mesh.dispose();
+  }
+  group = new THREE.Group();
+  scene.add(group);
+  const c = cur();
+
+  real = [];
+  slot = new Int32Array(c.nodes.length).fill(-1);
+  c.nodes.forEach((n, i) => { if (!isGroup(n)) { slot[i] = real.length; real.push(i); } });
+
+  mesh = new THREE.InstancedMesh(unitBox, boxMat, real.length);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  // r128 culls an instanced mesh by the bounding sphere of its one unit box
+  mesh.frustumCulled = false;
+  group.add(mesh);
+  outline.opacity = real.length > 2000 ? 0.12 : 0.3;
+  edgeGeo = new THREE.BufferGeometry();
+  edgeGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(real.length * 72), 3));
+  group.add(new THREE.LineSegments(edgeGeo, outline));
+
+  linkPairs = []; groupPairs = [];
+  c.nodes.forEach((n, i) => {
+    if (n[3] < 0) return;
+    (isGroup(c.nodes[n[3]]) ? groupPairs : linkPairs).push(n[3], i);
+  });
+  linkGeo = lineGeometry(linkPairs.length / 2);
+  group.add(new THREE.LineSegments(linkGeo, linkMat));
+  groupGeo = lineGeometry(groupPairs.length / 2);
+  group.add(new THREE.LineSegments(groupGeo, groupMat));
+
+  crossLines = null;
+  if (c.cross.length) {
+    crossGeo = lineGeometry(c.cross.length);
+    crossLines = new THREE.LineSegments(crossGeo, crossMat);
+    group.add(crossLines);
+  }
+  axisLine = null;
+  if (isPG()) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
+    axisLine = new THREE.Line(g, linkMat);
+    group.add(axisLine);
+  }
+  from = to = P = centres(state.rule);
+  dur = 0;
+  dirty = true;
+  recolour();
+}
+
+function place(now) {
+  const moving = dur && now - t0 < dur;
+  if (!moving && !dirty) return;
+  const c = cur(), s = state.scale, n = c.nodes.length;
+  if (moving) {
+    const k = (now - t0) / dur;
+    const e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+    P = new Float32Array(n * 3);
+    for (let j = 0; j < n * 3; j++) P[j] = from[j] + (to[j] - from[j]) * e;
+  } else {
+    P = to;
+    dur = 0;
+  }
+  dirty = moving;
+
+  const m = mesh.instanceMatrix.array, ev = edgeGeo.attributes.position.array;
+  real.forEach((i, k) => {
+    const nd = c.nodes[i];
+    const sx = Math.max(nd[0], 0.4) * 0.985, sy = Math.max(nd[1] * s, 0.4), sz = Math.max(nd[2], 0.4) * 0.985;
+    const x = P[3 * i], y = P[3 * i + 1], z = P[3 * i + 2];
+    m.set([sx, 0, 0, 0, 0, sy, 0, 0, 0, 0, sz, 0, x, y, z, 1], 16 * k);
+    for (let v = 0; v < 24; v++) {
+      ev[72 * k + 3 * v] = x + EDGE[3 * v] * sx;
+      ev[72 * k + 3 * v + 1] = y + EDGE[3 * v + 1] * sy;
+      ev[72 * k + 3 * v + 2] = z + EDGE[3 * v + 2] * sz;
+    }
+  });
+  mesh.instanceMatrix.needsUpdate = true;
+  edgeGeo.attributes.position.needsUpdate = true;
+  edgeGeo.computeBoundingSphere();
+
+  const half = i => (c.nodes[i][1] * s) / 2;
+  const fill = (geo, pairs) => {
+    const a = geo.attributes.position.array;
+    for (let j = 0; j < pairs.length; j += 2) {
+      const u = pairs[j], v = pairs[j + 1];
+      a.set([P[3 * u], P[3 * u + 1] - half(u), P[3 * u + 2], P[3 * v], P[3 * v + 1] + half(v), P[3 * v + 2]], 3 * j);
+    }
+    geo.attributes.position.needsUpdate = true;
+    geo.computeBoundingSphere();
+  };
+  fill(linkGeo, linkPairs);
+  fill(groupGeo, groupPairs);
+  if (crossLines) {
+    fill(crossGeo, c.cross.flat());
+    crossLines.computeLineDistances();
+  }
+  if (axisLine) {
+    const ex = extentOf(c, state.rule);
+    const pad = Math.max(ex.x, ex.z) * 0.06;
+    axisLine.geometry.attributes.position.array.set([-ex.x / 2 - pad, (ex.y * s) / 2, -ex.z / 2 - pad, -ex.x / 2 - pad, -(ex.y * s) / 2, -ex.z / 2 - pad]);
+    axisLine.geometry.attributes.position.needsUpdate = true;
+    axisLine.geometry.computeBoundingSphere();
+  }
+}
+
+function recolour() {
+  const c = cur(), L = c.layouts[state.rule];
+  real.forEach((i, k) => {
+    const n = c.nodes[i];
+    let key;
+    if (state.colour === "kind" && isPG()) {
+      key = n[3] < 0 || isGroup(c.nodes[n[3]]) ? "root" : n[9] ? "mined" : "moved";
+      if (key === "root" && n[9]) key = "rootmined";
+    } else {
+      const a = n[3] < 0 ? -1 : L[3 * n[3] + 2];
+      key = a < 0 ? "root" : a === 0 ? "x" : "z";
+    }
+    mesh.setColorAt(k, palette[key]);
+  });
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  legend();
+}
+
+function applyTheme() {
+  scene.background = new THREE.Color(token("--panel"));
+  for (const k of ["x", "z", "root", "mined", "moved"]) palette[k] = new THREE.Color(token("--" + k));
+  palette.rootmined = palette.mined.clone().lerp(palette.root, 0.45);
+  outline.color.set(token("--fg"));
+  linkMat.color.set(token("--edge"));
+  groupMat.color.set(token("--edge"));
+  crossMat.color.set(token("--cross"));
+  if (mesh) recolour();
+}
+
+function frame() {
+  const e = extentOf(cur(), state.rule);
+  const r = Math.max(e.x, e.z, e.y * state.scale);
+  const dist = r * 1.55;
+  if (state.view === "top") camera.position.set(0, dist * 1.05, 0.001);
+  else if (state.view === "front") camera.position.set(0, 0, dist * 1.05);
+  else camera.position.set(dist * 0.62, dist * 0.42, dist * 0.78);
+  camera.near = dist / 2000;
+  camera.far = dist * 20;
+  camera.updateProjectionMatrix();
+  controls.target.set(0, 0, 0);
+  controls.update();
+}
+
+function niceStep(span, count) {
+  const raw = span / count, p = Math.pow(10, Math.floor(Math.log10(raw)));
+  return [1, 2, 2.5, 5, 10].map(m => m * p).find(s => s >= raw);
+}
+
+// Block-height labels along the time axis, projected into the stage every frame.
+const tickPool = [];
+function drawTicks() {
+  const c = cur();
+  if (!isPG() || state.view === "top") {
+    tickPool.forEach(t => (t.hidden = true));
+    return;
+  }
+  const e = extentOf(c, state.rule), s = state.scale;
+  const pad = Math.max(e.x, e.z) * 0.06;
+  const first = c.time.forward ? c.time.origin : c.time.origin - e.y;
+  const last = c.time.forward ? c.time.origin + e.y : c.time.origin;
+  const step = niceStep(last - first, 6);
+  const blocks = [];
+  for (let b = Math.ceil(first / step) * step; b <= last; b += step) blocks.push(b);
+  const r = stage.getBoundingClientRect();
+  blocks.forEach((b, j) => {
+    let el = tickPool[j];
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "tick";
+      ticksEl.appendChild(el);
+      tickPool.push(el);
+    }
+    const yLayout = c.time.forward ? b - c.time.origin : c.time.origin - b;
+    const v = new THREE.Vector3(-e.x / 2 - pad, -yLayout * s + (e.y * s) / 2, -e.z / 2 - pad).project(camera);
+    el.hidden = !(v.z < 1 && Math.abs(v.x) < 1.2 && Math.abs(v.y) < 1.2);
+    el.style.left = ((v.x + 1) / 2) * r.width + "px";
+    el.style.top = ((1 - v.y) / 2) * r.height + "px";
+    el.textContent = "block " + fmt.format(b);
+  });
+  for (let j = blocks.length; j < tickPool.length; j++) tickPool[j].hidden = true;
+}
+
+function legend() {
+  const c = cur();
+  const el = document.getElementById("legend");
+  const sw = (v, text) => `<div class="key"><span class="sw" style="background: ${v}"></span><span>${text}</span></div>`;
+  let h;
+  if (state.colour === "kind" && isPG()) {
+    h = `<span class="label">Colour: what the output is</span>` +
+      sw("var(--mined)", "A coinbase output: newly mined coins") +
+      sw("var(--moved)", "An output of a transfer");
+    if (c.key === "tenk") h += sw("color-mix(in srgb, var(--mined) 55%, var(--root))", "A root: an output still unspent at block 9,909, mined") + sw("var(--root)", "A root: an output still unspent at block 9,909, transferred");
+    else h += sw("var(--root)", c.time.forward ? "The coinbase output the tree starts from" : "The output every coin here ends up in");
+  } else {
+    h = `<span class="label">Colour: the axis a node's family was separated along</span>` +
+      sw("var(--x)", "Siblings separated along <b>x</b>") + sw("var(--z)", "Siblings separated along <b>z</b>") + sw("var(--root)", "Root");
+  }
+  if (c.cross.length) h += `<div class="key"><span class="sw dash"></span><span>A DAG arc the tree leaves out</span></div>`;
+  if (c.key === "tenk") h += `<div class="key"><span class="sw line"></span><span>The grouping tree, on the top plane</span></div>`;
+  el.innerHTML = h;
+}
+
+function figures() {
+  const c = cur(), e = extentOf(c, state.rule), f = c.facts;
+  const rows = [];
+  const add = (k, v) => rows.push(`<dt>${k}</dt><dd>${v}</dd>`);
+  if (c.key === "tenk") {
+    add("Transactions", `${fmt.format(f.txs)} (${fmt.format(f.coinbase)} coinbase)`);
+    add("Outputs", fmt.format(f.outputs));
+    add("Arcs", fmt.format(f.arcs));
+    add("Unspent at block 9,909", fmt.format(f.unspent));
+    add("Components", `${fmt.format(f.components)} (${fmt.format(f.singles)} single outputs)`);
+    add("Largest component", fmt.format(f.largest) + " outputs");
+    add("Arcs left out of the tree", fmt.format(f.cross));
+    add("Grouping nodes", fmt.format(f.groups));
+    add("Blocks", fmt.format(f.blocks[0]) + "–" + fmt.format(f.blocks[1]));
+  } else if (isPG()) {
+    add("Outputs", fmt.format(f.nodes));
+    add("Transactions", fmt.format(f.txs));
+    add("Coinbase outputs", fmt.format(f.coinbase));
+    add("Widest family", fmt.format(f.fanin) + (c.time.forward ? " outputs" : " inputs"));
+    add("Levels", fmt.format(f.levels));
+    add("Arcs left out of the tree", fmt.format(f.cross));
+    add("Blocks", fmt.format(f.blocks[0]) + "–" + fmt.format(f.blocks[1]));
+  } else {
+    add("Boxes", fmt.format(f.nodes));
+    add("Depth", fmt.format(e.y));
+  }
+  add("Footprint (x × z)", `${fmt.format(Math.round(e.x * 10) / 10)} × ${fmt.format(Math.round(e.z * 10) / 10)}`);
+  add("Overlapping boxes", "0 (checked pairwise)");
+  document.getElementById("figs").innerHTML = rows.join("");
+}
+
+function describe(i) {
+  const c = cur(), n = c.nodes[i];
+  if (!isPG()) return `<b>box ${i + 1}</b><br><span class="k">w × h × d</span> ${n[0]} × ${n[1]} × ${n[2]}`;
+  const [, , , , txid, vout, btc, created, spent, coinbase] = n;
+  const where = c.key === "tenk" ? "this window ends" : "the data ends";
+  const end = spent < 0 ? `unspent at block ${fmt.format(c.facts.blocks[1])}, where ${where}` : `spent in block ${fmt.format(spent)}`;
+  return `<b>tx ${fmt.format(txid)} · output ${vout}</b><br>${btcFmt.format(btc)} BTC${coinbase ? " · coinbase" : ""}<br>` +
+    `<span class="k">created in block ${fmt.format(created)}, ${end}</span>`;
+}
+
+const ray = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+function hover(ev) {
+  const r = stage.getBoundingClientRect();
+  pointer.set(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(pointer, camera);
+  const hit = ray.intersectObject(mesh, false)[0];
+  if (!hit || hit.instanceId === undefined) { tip.hidden = true; return; }
+  tip.innerHTML = describe(real[hit.instanceId]);
+  tip.hidden = false;
+  const x = ev.clientX - r.left, y = ev.clientY - r.top;
+  tip.style.left = Math.max(8, Math.min(x + 14, r.width - tip.offsetWidth - 8)) + "px";
+  tip.style.top = Math.max(8, Math.min(y + 14, r.height - tip.offsetHeight - 8)) + "px";
+}
+// at most one hit test per frame: there are ten thousand instances to test
+let pending = null;
+renderer.domElement.addEventListener("pointermove", ev => (pending = ev));
+renderer.domElement.addEventListener("pointerleave", () => { pending = null; tip.hidden = true; });
+
+function resize() {
+  const r = stage.getBoundingClientRect();
+  renderer.setSize(r.width, r.height, false);
+  camera.aspect = r.width / Math.max(1, r.height);
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(stage);
+
+function tick(now) {
+  place(now);
+  if (pending) { hover(pending); pending = null; }
+  controls.update();
+  renderer.render(scene, camera);
+  drawTicks();
+  requestAnimationFrame(tick);
+}
+
+function press(prefix, ids, on) {
+  for (const id of ids) document.getElementById(prefix + id).setAttribute("aria-pressed", String(id === on));
+}
+
+function setRule(rule) {
+  if (rule === state.rule) return;
+  from = P;
+  state.rule = rule;
+  to = centres(rule);
+  t0 = performance.now();
+  dur = reduced ? 0 : 900;
+  dirty = true;
+  recolour(); figures(); frame();
+  press("lay-", RULES, rule);
+}
+
+function setView(view) {
+  state.view = view;
+  frame();
+  press("view-", ["orbit", "top", "front"], view);
+}
+
+function setColour(colour) {
+  state.colour = colour;
+  recolour();
+  press("col-", ["axis", "kind"], colour);
+}
+
+const scaleInput = document.getElementById("scale");
+scaleInput.addEventListener("input", () => {
+  state.scale = baseScale(cur()) * Math.pow(10, Number(scaleInput.value));
+  from = to = P = centres(state.rule);
+  dur = 0;
+  dirty = true;
+});
+
+function setCase(i) {
+  state.c = i;
+  const c = cur();
+  document.querySelectorAll("#cases button").forEach((b, j) => b.setAttribute("aria-pressed", String(j === i)));
+  document.getElementById("blurb").textContent = c.blurb;
+  document.getElementById("note").textContent = NOTES[c.key];
+  document.getElementById("colour-g").hidden = !isPG();
+  document.getElementById("scale-g").hidden = !isPG();
+  state.colour = isPG() ? "kind" : "axis";
+  press("col-", ["axis", "kind"], state.colour);
+  scaleInput.value = 0;
+  state.scale = baseScale(c);
+  tip.hidden = true;
+  build();
+  figures();
+  frame();
+}
+
+const casesEl = document.getElementById("cases");
+CASES.forEach((c, i) => {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.id = "case-" + c.key;
+  b.textContent = c.title;
+  b.setAttribute("aria-pressed", "false");
+  b.addEventListener("click", () => setCase(i));
+  casesEl.appendChild(b);
+});
+
+for (const r of RULES) document.getElementById("lay-" + r).addEventListener("click", () => setRule(r));
+for (const v of ["orbit", "top", "front"]) document.getElementById("view-" + v).addEventListener("click", () => setView(v));
+document.getElementById("col-axis").addEventListener("click", () => setColour("axis"));
+document.getElementById("col-kind").addEventListener("click", () => setColour("kind"));
+
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
+new MutationObserver(applyTheme).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+
+applyTheme();
+resize();
+const hashCase = CASES.findIndex(c => location.hash === "#" + c.key);
+setCase(hashCase >= 0 ? hashCase : 0);
+requestAnimationFrame(tick);
+</script>
